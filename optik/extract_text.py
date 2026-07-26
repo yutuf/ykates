@@ -289,10 +289,16 @@ def in_any_box(w, boxes) -> bool:
 
 def question_text(page, q, prof, is_boilerplate, radicals: list[tuple] = (),
                   figures: list = ()) -> QuestionText:
+    # Kırpma tarafındaki eleyici tek harfleri de atar (mühürdeki "A", "B"
+    # rozetleri). Metin çıkarırken bu YANLIŞ olur: şıklardaki roma rakamı
+    # "I" da tek harftir ve atılınca "B) I ve II" -> "B) ve II" olur, yani
+    # öğrenci yanlış şık görür. Burada yalnızca filigran sözcükleri ve
+    # sayfa altı şeridi elenir.
     words = [
         w for w in page.words
         if q.x0 - 1 <= w.x0 < q.x1 and q.y0 <= w.y0 < q.y1
-        and not is_boilerplate(w, page.height, prof)
+        and w.text not in prof.watermark_words
+        and w.y0 <= page.height - prof.footer_band
     ]
     # soru numarasının kendisi gövdeye girmesin
     words = [w for w in words if not prof.qnum_pattern.match(w.text)]
