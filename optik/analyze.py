@@ -127,32 +127,59 @@ def crop_path(crops_dir: Path, subject: str, number: int) -> Path | None:
     return p if p.exists() else None
 
 
-def compose_test(images: list[Path], out_pdf: Path, title: str) -> int:
-    """Soru görsellerini A4 sayfalara dizip tek PDF yapar. Sayfa başına
-    kaç soru sığdığı görsellerin yüksekliğine göre değişir; bir soru
-    bölünmez, sığmıyorsa sonraki sayfaya geçer."""
+def remove_watermark(im: Image.Image) -> Image.Image:
+    """Arka plandaki soluk pembe/kırmızı filigranı (MEB mührü) beyaza
+    çeker. Filigran gerçek siyah metinle aynı katmanda basılı olduğu için
+    renkten ayrılır: açık tonlu VE belirgin kırmızı/pembe ağırlıklı
+    pikseller silinir. Siyah metin (koyu), mavi/yeşil grafik öğeleri
+    (kırmızı baskın değil) ve beyaz zemin etkilenmez."""
+    px = im.load()
+    w, h = im.size
+    for y in range(h):
+        for x in range(w):
+            r, g, b = px[x, y][:3]
+            if min(r, g, b) >= 180 and r >= g and r >= b and (r - min(g, b)) >= 8:
+                px[x, y] = (255, 255, 255)
+    return im
+
+
+def compose_test(images: list[Path], out_pdf: Path, title: str,
+                 clean: bool = True) -> int:
+    """Soru görsellerini A4 sayfalara dizip tek PDF yapar.
+
+    Ölçek TÜM sorular için AYNIDIR. Her görseli tek tek sayfa genişliğine
+    yaymak, dar kırpılmış (iki sütunlu) sorularla tam sayfa soruları
+    farklı punto gösteriyordu; kitapçık gibi durması için tek bir ölçek
+    kullanılır. Bir soru bölünmez, sığmıyorsa sonraki sayfaya geçer."""
     if not images:
         return 0
+    usable_w = PAGE_W - 2 * PAGE_MARGIN
+    usable_h = PAGE_H - 2 * PAGE_MARGIN
+
+    loaded = []
+    for p in images:
+        with Image.open(p) as im:
+            im = im.convert("RGB")
+            loaded.append(remove_watermark(im.copy()) if clean else im.copy())
+
+    # Tek ortak ölçek: en geniş soru sayfaya tam otursun, diğerleri de
+    # aynı oranda küçülsün -> her soruda punto aynı.
+    scale = min(1.0, usable_w / max(im.width for im in loaded))
+
     pages: list[Image.Image] = []
     canvas = Image.new("RGB", (PAGE_W, PAGE_H), "white")
     y = PAGE_MARGIN
-    usable = PAGE_W - 2 * PAGE_MARGIN
-
-    for img_path in images:
-        with Image.open(img_path) as im:
-            im = im.convert("RGB")
-            scale = min(1.0, usable / im.width)
-            w, h = int(im.width * scale), int(im.height * scale)
-            # tek başına sayfaya sığmayan çok uzun soruyu sayfaya sığdır
-            if h > PAGE_H - 2 * PAGE_MARGIN:
-                scale = (PAGE_H - 2 * PAGE_MARGIN) / im.height
-                w, h = int(im.width * scale), int(im.height * scale)
-            if y + h > PAGE_H - PAGE_MARGIN and y > PAGE_MARGIN:
-                pages.append(canvas)
-                canvas = Image.new("RGB", (PAGE_W, PAGE_H), "white")
-                y = PAGE_MARGIN
-            canvas.paste(im.resize((w, h), Image.LANCZOS), (PAGE_MARGIN, y))
-            y += h + GAP
+    for im in loaded:
+        w, h = int(im.width * scale), int(im.height * scale)
+        if h > usable_h:  # tek başına sayfayı aşan çok uzun soru
+            shrink = usable_h / h
+            w, h = int(w * shrink), int(h * shrink)
+        if y + h > PAGE_H - PAGE_MARGIN and y > PAGE_MARGIN:
+            pages.append(canvas)
+            canvas = Image.new("RGB", (PAGE_W, PAGE_H), "white")
+            y = PAGE_MARGIN
+        canvas.paste(im.resize((w, h), Image.LANCZOS), (PAGE_MARGIN, y))
+        y += h + GAP
     pages.append(canvas)
 
     out_pdf.parent.mkdir(parents=True, exist_ok=True)

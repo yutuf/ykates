@@ -230,7 +230,12 @@ def header_cutoff(page: Page, profile: Profile, furniture: set) -> float:
         and not is_furniture(w, furniture)
         and starts_a_question(page, w)
     ]
-    return min(tops) if tops else profile.header_y_max
+    # İlk soru bandı DARALTIR, asla genişletmez. Genişletmesine izin
+    # verilirse kapak sayfası tuzağa düşer: kapaktaki sınav talimatları
+    # ("1. Salon yoklama listesinde...") soru gibi göründüğü için band
+    # sayfanın ortasına kadar açılır, oradaki "DERS ADI / MATEMATİK"
+    # tablosu başlık sanılır ve kapak bir Matematik sayfasına dönüşür.
+    return min(min(tops), profile.header_y_max) if tops else profile.header_y_max
 
 
 def header_text(page: Page, profile: Profile, furniture: set) -> str:
@@ -781,105 +786,31 @@ def words_from_nim(page_images: list[Path], dpi: int, api_key: str,
     return pages
 
 
-_TEXT_KEYS = ("text", "value", "label", "content", "transcription")
-_CONF_KEYS = ("confidence", "score", "conf", "probability")
-_BOX_KEYS = ("bounding_box", "bbox", "box", "polygon", "points", "quad",
-             "bounding_poly", "region")
-
-
-def _first_number(d: dict, keys) -> float | None:
-    for k in keys:
-        v = d.get(k)
-        if isinstance(v, (int, float)):
-            return float(v)
-    return None
-
-
-def _extract_points(value) -> list[tuple] | None:
-    """Kutu gösterimini (x, y) çiftlerine indirger. NIM ailesindeki
-    modeller kutuyu farklı biçimlerde verebiliyor: köşe listesi
-    ([[x,y],...] ya da [{"x":..,"y":..},...]), {"points": [...]} sarmalı,
-    ya da düz {x_min,y_min,x_max,y_max} / [x0,y0,x1,y1]."""
-    if isinstance(value, dict):
-        for k in ("points", "vertices", "corners", "polygon"):
-            if k in value:
-                return _extract_points(value[k])
-        keys = ("x_min", "y_min", "x_max", "y_max")
-        alt = ("xmin", "ymin", "xmax", "ymax")
-        alt2 = ("left", "top", "right", "bottom")
-        for group in (keys, alt, alt2):
-            if all(k in value for k in group):
-                a, b, c, d = (float(value[k]) for k in group)
-                return [(a, b), (c, d)]
-        if all(k in value for k in ("x", "y", "width", "height")):
-            x, y = float(value["x"]), float(value["y"])
-            return [(x, y), (x + float(value["width"]), y + float(value["height"]))]
-        return None
-    if isinstance(value, (list, tuple)) and value:
-        if all(isinstance(p, (int, float)) for p in value) and len(value) == 4:
-            a, b, c, d = (float(v) for v in value)
-            return [(a, b), (c, d)]
-        pts = []
-        for p in value:
-            if isinstance(p, (list, tuple)) and len(p) >= 2:
-                pts.append((float(p[0]), float(p[1])))
-            elif isinstance(p, dict) and "x" in p and "y" in p:
-                pts.append((float(p["x"]), float(p["y"])))
-        return pts or None
-    return None
-
-
-def _walk_detections(node):
-    """Yanıtın neresinde olursa olsun, metin + kutu taşıyan sözlükleri
-    bulur. Sarmalayıcı alan adları sürümden sürüme değiştiği için
-    (data / predictions / results / outputs ...) ağaç geziliyor."""
-    if isinstance(node, dict):
-        has_text = any(isinstance(node.get(k), str) and node.get(k).strip()
-                       for k in _TEXT_KEYS)
-        has_box = any(k in node for k in _BOX_KEYS)
-        if has_text and has_box:
-            yield node
-        for v in node.values():
-            yield from _walk_detections(v)
-    elif isinstance(node, list):
-        for v in node:
-            yield from _walk_detections(v)
-
-
 def _nim_detections(body: dict, px_w: int, px_h: int, scale: float,
                     min_conf: float) -> list[Word]:
-    """NIM yanıtındaki metin kutularını Word'e çevirir.
-
-    Yanıt şeması NIM sürümüne/modeline göre değişebildiği için tek bir
-    biçim varsayılmaz: ağaç gezilerek metin+kutu taşıyan düğümler bulunur,
-    kutu gösterimi normalize edilir. Koordinatlar [0,1] aralığındaysa
-    piksele çevrilir, değilse zaten piksel kabul edilir."""
+    """NIM yanıtındaki metin kutularını Word'e çevirir. Koordinatlar
+    belgelenen biçimde [0,1] aralığında normalize gelir; 1'den büyük
+    değerler görülürse piksel kabul edilip öyle ölçeklenir."""
     out: list[Word] = []
-    for det in _walk_detections(body):
-        text = next((det[k].strip() for k in _TEXT_KEYS
-                     if isinstance(det.get(k), str) and det[k].strip()), "")
-        conf = _first_number(det, _CONF_KEYS)
-        conf = 1.0 if conf is None else conf
-        if conf > 1.0:  # 0-100 ölçeği
-            conf /= 100.0
-        if not text or conf < min_conf:
-            continue
-        pts = None
-        for k in _BOX_KEYS:
-            if k in det:
-                pts = _extract_points(det[k])
-                if pts:
-                    break
-        if not pts:
-            continue
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        if max(xs) <= 1.0 and max(ys) <= 1.0:      # normalize -> piksel
-            xs = [x * px_w for x in xs]
-            ys = [y * px_h for y in ys]
-        out.append(Word(min(xs) * scale, min(ys) * scale,
-                        max(xs) * scale, max(ys) * scale,
-                        text, conf * 100.0))
+    data = body.get("data") or body.get("predictions") or []
+    for item in data:
+        for det in (item.get("text_detections") or item.get("detections") or []):
+            text = (det.get("text") or
+                    (det.get("text_prediction") or {}).get("text") or "").strip()
+            conf = float(det.get("confidence", det.get("score", 1.0)))
+            if not text or conf < min_conf:
+                continue
+            poly = (det.get("bounding_box") or {}).get("points") or det.get("polygon")
+            if not poly:
+                continue
+            xs = [float(p[0] if isinstance(p, (list, tuple)) else p["x"]) for p in poly]
+            ys = [float(p[1] if isinstance(p, (list, tuple)) else p["y"]) for p in poly]
+            if max(xs) <= 1.0 and max(ys) <= 1.0:      # normalize -> piksel
+                xs = [x * px_w for x in xs]
+                ys = [y * px_h for y in ys]
+            out.append(Word(min(xs) * scale, min(ys) * scale,
+                            max(xs) * scale, max(ys) * scale,
+                            text, conf * 100.0))
     return out
 
 
