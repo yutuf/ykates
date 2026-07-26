@@ -171,7 +171,10 @@ def build_html(questions: list[dict], title: str, subtitle: str,
             # taşınır. Şekil ile etiketleri birbirinden ayırmaya çalışmak
             # her ikisini de bozuyordu; bütün hâlinde alınca soru
             # basıldığı gibi doğru kalıyor, sayfa düzeni yine bizde.
-            uri = figure_data_uri(q["tam_kirpim"], pages_dir, pad=2.0)
+            # pad=0: tam soru kırpımının sınırları içerikten zaten hassas
+            # hesaplandı. Buraya pay eklemek üstbilgi ayraç çizgisini geri
+            # çağırıyor (çizgi, soru numarasının ~2pt üstünde duruyor).
+            uri = figure_data_uri(q["tam_kirpim"], pages_dir, pad=0.0)
             body = (f'<div class="fig whole"><img src="{uri}" alt=""></div>'
                     if uri else "")
             blocks.append(
