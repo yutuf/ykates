@@ -324,7 +324,12 @@ def content_bounds(page, q, prof, figures) -> dict:
     # birlikte taşınır.
     first = min(num_words, key=lambda w: w.y0) if num_words else None
 
-    xs0 = [w.x0 for w in words] + [b.x0 for b in figures]
+    # Soru numarası kırpımda beyazlatılıyor; sol sınır ONA göre alınırsa
+    # her görselin solunda ~24pt boş şerit kalıyor ve soru, metin modundaki
+    # sorulara göre sağa kaymış görünüyor. Sol sınır bu yüzden numara
+    # dışındaki içerikten hesaplanır.
+    body = [w for w in words if not prof.qnum_pattern.match(w.text)] or words
+    xs0 = [w.x0 for w in body] + [b.x0 for b in figures]
     xs1 = [w.x1 for w in words] + [b.x1 for b in figures]
     ys1 = [w.y1 for w in words] + [b.y1 for b in figures]
     out = {

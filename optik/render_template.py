@@ -82,7 +82,7 @@ header .meta .line { display: inline-block; border-bottom: 1px dotted #9aa1ad; w
 .fig { margin: 7px 0 9px; text-align: center; }
 .fig img { max-width: 78%; max-height: 62mm; height: auto; }
 .fig.whole { text-align: left; margin: 2px 0 4px; }
-.fig.whole img { max-width: 100%; max-height: 210mm; }
+.fig.whole img { max-width: 100%; max-height: 215mm; height: auto; }
 
 /* Kök işareti: √ + payın üstüne çizgi. Salt CSS, kütüphane yok. */
 .sqrt { white-space: nowrap; }
@@ -175,7 +175,13 @@ def build_html(questions: list[dict], title: str, subtitle: str,
             # hesaplandı. Buraya pay eklemek üstbilgi ayraç çizgisini geri
             # çağırıyor (çizgi, soru numarasının ~2pt üstünde duruyor).
             uri = figure_data_uri(q["tam_kirpim"], pages_dir, pad=0.0)
-            body = (f'<div class="fig whole"><img src="{uri}" alt=""></div>'
+            # Gerçek boyutunda bas (pt -> mm), yüzdeyle esnetme. Yüzde
+            # kullanılınca her kırpım kabın tamamına yayılıyor; genişliği
+            # farklı sorular farklı punto ve farklı sol kenarla çıkıyordu.
+            crop = q["tam_kirpim"]
+            width_mm = (crop["x1"] - crop["x0"]) * 25.4 / 72.0
+            body = (f'<div class="fig whole">'
+                    f'<img src="{uri}" style="width:{width_mm:.1f}mm" alt=""></div>'
                     if uri else "")
             blocks.append(
                 f'<div class="q"><div class="num">{i}</div>'
