@@ -77,11 +77,12 @@ class QuestionText:
     stem: str = ""
     options: dict = field(default_factory=dict)
     flags: list = field(default_factory=list)
+    figures: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {"soru": self.number, "ders": self.subject,
                 "govde": self.stem, "siklar": self.options,
-                "uyarilar": self.flags}
+                "gorseller": self.figures, "uyarilar": self.flags}
 
 
 def classify(words, baseline_h: float, radicals: list[tuple] = ()):
@@ -157,7 +158,73 @@ def join_hyphenation(lines: list[str]) -> str:
     return out
 
 
-def question_text(page, q, prof, is_boilerplate, radicals: list[tuple] = ()) -> QuestionText:
+MIN_FIGURE_SIDE = 38.0   # pt: bundan küçük çizim kümesi şekil sayılmaz
+FIGURE_MERGE_GAP = 12.0  # pt: bu kadar yakın çizimler tek şekle toplanır
+DECOR_MIN_PAGES = 5      # aynı yerde bu kadar sayfada tekrar eden çizim = süsleme
+
+
+def decoration_rects(doc) -> set:
+    """Filigran/mühür çizimlerini konumundan tanır: her sayfada TAM AYNI
+    yerde tekrar ederler. Renge göre elemek yayınevine bağımlı olurdu
+    (MEB'inki şeffaflıkla soluk görünen doygun kırmızı), tekrar konumu
+    ise yayınevinden bağımsız bir imzadır."""
+    seen: dict = {}
+    for pno in range(doc.page_count):
+        for d in doc[pno].get_drawings():
+            r = d["rect"]
+            key = (round(r.x0), round(r.y0), round(r.x1), round(r.y1))
+            seen.setdefault(key, set()).add(pno)
+    threshold = max(DECOR_MIN_PAGES, doc.page_count // 5)
+    return {k for k, pages in seen.items() if len(pages) >= threshold}
+
+
+def figure_boxes(pdf_page, q, decorations: set) -> list:
+    """Sorunun içindeki görsel bölgeleri döndürür (çizim kümeleri +
+    gömülü resimler). Şeklin İÇİNDEKİ etiketler ("3x cm", "Yukarı") böylece
+    gövde metninden ayıklanabilir; aksi hâlde cümlenin ortasına karışıyor."""
+    import fitz
+
+    boxes = []
+    for d in pdf_page.get_drawings():
+        r = d["rect"]
+        key = (round(r.x0), round(r.y0), round(r.x1), round(r.y1))
+        if key in decorations:
+            continue
+        # kök çizgisi / alt çizgi gibi ince çizgiler şekil değildir
+        if r.height < 15 and r.width < 60:
+            continue
+        boxes.append(fitz.Rect(r))
+    for im in pdf_page.get_image_info():
+        boxes.append(fitz.Rect(im["bbox"]))
+
+    inside = [b for b in boxes
+              if b.y0 >= q.y0 - 4 and b.y1 <= q.y1 + 4
+              and b.x0 >= q.x0 - 4 and b.x1 <= q.x1 + 4]
+
+    merged: list = []
+    for b in sorted(inside, key=lambda r: (r.y0, r.x0)):
+        placed = False
+        for i, m in enumerate(merged):
+            grown = fitz.Rect(m) + (-FIGURE_MERGE_GAP, -FIGURE_MERGE_GAP,
+                                    FIGURE_MERGE_GAP, FIGURE_MERGE_GAP)
+            if grown.intersects(b):
+                merged[i] = fitz.Rect(m) | b
+                placed = True
+                break
+        if not placed:
+            merged.append(fitz.Rect(b))
+
+    return [m for m in merged
+            if m.width >= MIN_FIGURE_SIDE and m.height >= MIN_FIGURE_SIDE]
+
+
+def in_any_box(w, boxes) -> bool:
+    return any(b.x0 - 2 <= w.x0 and w.x1 <= b.x1 + 2
+               and b.y0 - 2 <= w.y0 and w.y1 <= b.y1 + 2 for b in boxes)
+
+
+def question_text(page, q, prof, is_boilerplate, radicals: list[tuple] = (),
+                  figures: list = ()) -> QuestionText:
     words = [
         w for w in page.words
         if q.x0 - 1 <= w.x0 < q.x1 and q.y0 <= w.y0 < q.y1
@@ -165,6 +232,9 @@ def question_text(page, q, prof, is_boilerplate, radicals: list[tuple] = ()) -> 
     ]
     # soru numarasının kendisi gövdeye girmesin
     words = [w for w in words if not prof.qnum_pattern.match(w.text)]
+    # şeklin içindeki etiketler gövde cümlesine karışmasın; onlar
+    # kırpılacak görselin parçası
+    words = [w for w in words if not in_any_box(w, figures)]
     if not words:
         return QuestionText(q.number, q.subject, flags=["metin_yok"])
 
@@ -211,6 +281,10 @@ def question_text(page, q, prof, is_boilerplate, radicals: list[tuple] = ()) -> 
             stem_lines.append(line)
 
     qt = QuestionText(q.number, q.subject, join_hyphenation(stem_lines), options)
+    qt.figures = [
+        {"x0": b.x0, "y0": b.y0, "x1": b.x1, "y1": b.y1, "sayfa": q.page}
+        for b in figures
+    ]
     if len(options) != 4:
         qt.flags.append(f"sik_sayisi={len(options)}")
     return qt
@@ -247,13 +321,15 @@ if __name__ == "__main__":
     by_index = {p.index: p for p in pages}
     doc = fitz.open(pdf)
     radicals_by_page = {i + 1: radical_spans(doc[i]) for i in range(doc.page_count)}
+    decorations = decoration_rects(doc)
 
     out = []
     for q in extract_questions(pages, MEB_LGS_PROFILE):
         if subject and q.subject != subject:
             continue
         page = by_index[q.page]
+        figures = figure_boxes(doc[q.page - 1], q, decorations)
         qt = question_text(page, q, MEB_LGS_PROFILE, is_boilerplate_word,
-                           radicals_by_page.get(q.page, []))
+                           radicals_by_page.get(q.page, []), figures)
         out.append(qt.as_dict())
     print(json.dumps(out, ensure_ascii=False, indent=2))

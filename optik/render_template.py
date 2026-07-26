@@ -59,6 +59,9 @@ header .meta .line { display: inline-block; border-bottom: 1px dotted #9aa1ad; w
 .opt .k { font-weight: 700; color: #3f4652; flex: 0 0 15px; }
 .opts.wide { grid-template-columns: 1fr; }
 
+.fig { margin: 7px 0 9px; text-align: center; }
+.fig img { max-width: 78%; max-height: 62mm; height: auto; }
+
 /* Kök işareti: √ + payın üstüne çizgi. Salt CSS, kütüphane yok. */
 .sqrt { white-space: nowrap; }
 .sqrt::before { content: "\\221A"; }
@@ -80,10 +83,43 @@ def to_html(text: str) -> str:
     return out
 
 
-def build_html(questions: list[dict], title: str, subtitle: str) -> str:
+def figure_data_uri(fig: dict, pages_dir: Path, dpi: int = 300, pad: float = 4.0) -> str | None:
+    """Şekli, kırpılmış sayfa görüntüsünden kesip base64 olarak gömer.
+    Gömmek, HTML'in tek dosya olarak taşınabilmesini sağlar."""
+    import base64
+    from io import BytesIO
+
+    from PIL import Image
+
+    page_png = pages_dir / f"page-{fig['sayfa']:02d}.png"
+    if not page_png.exists():
+        page_png = pages_dir / f"page-{fig['sayfa']}.png"
+    if not page_png.exists():
+        return None
+    scale = dpi / 72.0
+    with Image.open(page_png) as im:
+        box = (max(int((fig["x0"] - pad) * scale), 0),
+               max(int((fig["y0"] - pad) * scale), 0),
+               min(int((fig["x1"] + pad) * scale), im.width),
+               min(int((fig["y1"] + pad) * scale), im.height))
+        crop = im.crop(box).convert("RGB")
+    buf = BytesIO()
+    crop.save(buf, "PNG", optimize=True)
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def build_html(questions: list[dict], title: str, subtitle: str,
+               pages_dir: Path | None = None) -> str:
     blocks = []
     for i, q in enumerate(questions, start=1):
         opts = q.get("siklar") or {}
+        figs_html = ""
+        if pages_dir:
+            uris = [figure_data_uri(f, pages_dir) for f in q.get("gorseller", [])]
+            figs_html = "".join(
+                f'<div class="fig"><img src="{u}" alt=""></div>'
+                for u in uris if u
+            )
         longest = max((len(v) for v in opts.values()), default=0)
         wide = " wide" if longest > 38 else ""
         opt_html = "".join(
@@ -94,6 +130,7 @@ def build_html(questions: list[dict], title: str, subtitle: str) -> str:
         blocks.append(
             f'<div class="q"><div class="num">{i}</div><div class="body">'
             f'<div class="stem">{to_html(q.get("govde", ""))}</div>'
+            f'{figs_html}'
             f'<div class="opts{wide}">{opt_html}</div></div></div>'
         )
     return f"""<!doctype html><html lang="tr"><head><meta charset="utf-8">
@@ -130,10 +167,17 @@ if __name__ == "__main__":
         print(__doc__)
         raise SystemExit(2)
     out_pdf = Path(sys.argv[1])
+    args = sys.argv[2:]
+    pages_dir = None
+    if "--pages" in args:
+        i = args.index("--pages")
+        pages_dir = Path(args[i + 1])
+        args = args[:i] + args[i + 2:]
     questions: list[dict] = []
-    for path in sys.argv[2:]:
+    for path in args:
         questions.extend(json.loads(Path(path).read_text(encoding="utf-8")))
-    page = build_html(questions, "Özel Deneme", "Yanlış yapılan sorulardan derlenmiştir")
+    page = build_html(questions, "Özel Deneme",
+                      "Yanlış yapılan sorulardan derlenmiştir", pages_dir)
     out_pdf.parent.mkdir(parents=True, exist_ok=True)
     render_pdf(page, out_pdf)
     print(f"{len(questions)} soru -> {out_pdf}")
