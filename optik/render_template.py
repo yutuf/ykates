@@ -73,6 +73,12 @@ header .meta .line { display: inline-block; border-bottom: 1px dotted #9aa1ad; w
 .opt .k { font-weight: 700; color: #3f4652; flex: 0 0 15px; }
 .opts.wide { grid-template-columns: 1fr; }
 
+.tag-cap {
+  display: inline-block; background: #eef4ff; color: ACCENT;
+  border: 1px solid #cddffb; border-radius: 3px;
+  font: 700 6.8pt/1 "DejaVu Sans", sans-serif; letter-spacing: .3px;
+  padding: 3px 6px; margin-bottom: 5px; text-transform: uppercase;
+}
 .fig { margin: 7px 0 9px; text-align: center; }
 .fig img { max-width: 78%; max-height: 62mm; height: auto; }
 
@@ -145,8 +151,12 @@ def build_html(questions: list[dict], title: str, subtitle: str,
             f"<span>{to_html(v)}</span></div>"
             for k, v in sorted(opts.items())
         )
+        # Demo/sunum için isteğe bağlı yetenek etiketi
+        tag = q.get("etiket")
+        tag_html = f'<div class="tag-cap">{html.escape(tag)}</div>' if tag else ""
         blocks.append(
             f'<div class="q"><div class="num">{i}</div><div class="body">'
+            f'{tag_html}'
             f'<div class="stem">{to_html(q.get("govde", ""))}</div>'
             f'{figs_html}'
             f'<div class="opts{wide}">{opt_html}</div></div></div>'
