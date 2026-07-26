@@ -32,6 +32,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from PIL import Image
+
 WORD_RE = re.compile(
     r'<word xMin="([\d.]+)" yMin="([\d.]+)" xMax="([\d.]+)" yMax="([\d.]+)">(.*?)</word>'
 )
@@ -45,6 +47,9 @@ class Word:
     x1: float
     y1: float
     text: str
+    # OCR kaynaklı kelimelerde tanıma güveni (0-100). PDF metin katmanından
+    # gelenler kesin kabul edilir.
+    conf: float = 100.0
 
 
 @dataclass
@@ -191,30 +196,70 @@ def is_answer_key_page(page: Page, profile: Profile) -> bool:
     return all(tr_upper(marker) in text for marker in profile.answer_key_markers)
 
 
-def explicit_subject_for_page(page: Page, profile: Profile) -> str | None:
-    """Sayfa başlığında (üstte) geçen ders adını arar (harf büyüklüğünden
-    bağımsız) — sadece BU sayfada açıkça yazılıysa döner."""
-    header_words = [w for w in page.words if w.y0 < profile.header_y_max]
-    text = tr_upper(" ".join(w.text for w in header_words))
+def next_word_on_line(page: Page, cand: Word) -> Word | None:
+    same_line = [
+        w for w in page.words
+        if w is not cand and abs(w.y0 - cand.y0) < 3 and w.x0 > cand.x1
+    ]
+    if not same_line:
+        return None
+    return min(same_line, key=lambda w: w.x0)
+
+
+def starts_a_question(page: Page, w: Word) -> bool:
+    """'12.' benzeri bir belirtecin gerçekten soru başlatıp başlatmadığı.
+    Üstbilgi etiketleri de aynı kalıbı kullanır ("8. SINIF", "4. DENEME
+    SINAVI") ama devamı BÜYÜK HARF bir etikettir; soru metni ise normal
+    cümledir ("1. Aşağıda ...")."""
+    nxt = next_word_on_line(page, w)
+    if nxt is None:
+        return True
+    letters = [c for c in nxt.text if c.isalpha()]
+    return not (len(letters) >= 2 and all(c.isupper() for c in letters))
+
+
+def header_cutoff(page: Page, profile: Profile, furniture: set) -> float:
+    """Başlık bandının bittiği y. Sabit bir değer kullanmak güvenilmez:
+    bazı düzenlerde soru gövdesi 115pt'nin üstünde başlar ve gövdede geçen
+    bir ders adı ("...125.988 TÜRKÇE sözcük derlendi...") sayfanın dersini
+    yanlış belirler. Başlık, tanım gereği sayfadaki İLK SORUNUN üstünde
+    kalan kısımdır; soru bulunamazsa profildeki üst sınıra düşülür."""
+    tops = [
+        w.y0 for w in page.words
+        if profile.qnum_pattern.match(w.text)
+        and not is_furniture(w, furniture)
+        and starts_a_question(page, w)
+    ]
+    return min(tops) if tops else profile.header_y_max
+
+
+def header_text(page: Page, profile: Profile, furniture: set) -> str:
+    limit = header_cutoff(page, profile, furniture)
+    return tr_upper(" ".join(w.text for w in page.words if w.y0 < limit))
+
+
+def explicit_subject_for_page(page: Page, profile: Profile, furniture: set) -> str | None:
+    """Sayfa başlığında geçen ders adını arar (harf büyüklüğünden bağımsız)
+    — sadece BU sayfada açıkça yazılıysa döner."""
+    text = header_text(page, profile, furniture)
     for keyword, subject_id in profile.subject_keywords.items():
         if tr_upper(keyword) in text:
             return subject_id
     return None
 
 
-def is_generic_content_page(page: Page, profile: Profile) -> bool:
+def is_generic_content_page(page: Page, profile: Profile, furniture: set) -> bool:
     """content_markers boşsa hiçbir sayfa 'genel içerik' sayılmaz (ders adı
     her sayfada açıkça tekrar etmeli). Doluysa, o genel şeritlerden biri
     başlıkta geçen her sayfa içerik sayılır (ama hangi ders olduğu bir
     önceki açık eşleşmeden miras alınır)."""
     if not profile.content_markers:
         return False
-    header_words = [w for w in page.words if w.y0 < profile.header_y_max]
-    text = tr_upper(" ".join(w.text for w in header_words))
+    text = header_text(page, profile, furniture)
     return any(tr_upper(marker) in text for marker in profile.content_markers)
 
 
-def page_subjects(pages: list[Page], profile: Profile) -> dict:
+def page_subjects(pages: list[Page], profile: Profile, furniture: set) -> dict:
     """Her sayfanın dersini belirler. Birçok yayınevi ders adını SADECE o
     dersin ilk sayfasında yazar, sonraki sayfalarda sadece genel bir bölüm
     şeridi ("SAYISAL BÖLÜM" gibi) tekrar eder — bu yüzden başlıkta açık ders
@@ -231,11 +276,11 @@ def page_subjects(pages: list[Page], profile: Profile) -> dict:
             result[page.index] = None
             last = None
             continue
-        explicit = explicit_subject_for_page(page, profile)
+        explicit = explicit_subject_for_page(page, profile, furniture)
         if explicit is not None:
             result[page.index] = explicit
             last = explicit
-        elif page.index > 1 and last is not None and is_generic_content_page(page, profile):
+        elif page.index > 1 and last is not None and is_generic_content_page(page, profile, furniture):
             result[page.index] = last
         else:
             result[page.index] = None
@@ -271,21 +316,21 @@ def furniture_min_pages(n_content_pages: int) -> int:
     return max(7, n_content_pages // 4)
 
 
-def find_repeating_furniture(pages: list[Page], subjects: dict) -> set:
+def find_repeating_furniture(pages: list[Page]) -> set:
     """Üstbilgi/altbilgi şeritlerini (ör. "8. SINIF", "4. DENEME SINAVI")
     yayınevine özel kelime listesi yazmadan, verinin kendisinden bulur:
-    bu şeritler her içerik sayfasında TAM AYNI (metin, x, y) konumunda
-    tekrar eder. Gerçek soru metni ise sayfadan sayfaya kayar.
+    bu şeritler her sayfada TAM AYNI (metin, x, y) konumunda tekrar eder.
+    Gerçek soru metni ise sayfadan sayfaya kayar.
 
     Bu, üstbilgide geçen "8." gibi ifadelerin soru numarası sanılmasını
     engeller — hangi bandın üstbilgi olduğunu elle ayarlamaya gerek
-    kalmadan."""
-    content_pages = [p for p in pages if subjects.get(p.index) is not None]
-    if not content_pages:
+    kalmadan. Ders tespitinden ÖNCE çalışır (ders tespiti başlık bandını
+    bulmak için mobilyayı kullanır), bu yüzden tüm sayfalara bakar."""
+    if not pages:
         return set()
-    threshold = furniture_min_pages(len(content_pages))
+    threshold = furniture_min_pages(len(pages))
     seen: dict = {}
-    for page in content_pages:
+    for page in pages:
         for w in page.words:
             seen.setdefault((w.text, round(w.x0), round(w.y0)), set()).add(page.index)
     return {key for key, pgs in seen.items() if len(pgs) >= threshold}
@@ -296,6 +341,11 @@ def is_furniture(w: Word, furniture: set) -> bool:
 
 
 # ─────────────────────────── Sütun tespiti (otomatik) ───────────────────
+
+# OCR şerit taramasında toplanacak numara biçimi. Tesseract noktayı bazen
+# virgül/parantez okuduğu ya da hiç okumadığı için kalıp gevşek tutulur;
+# gerçek soru olup olmadığına yine sıra doğrulaması karar verir.
+QNUM_LOOSE_RE = re.compile(r"^\d{1,2}[.,)]?$")
 
 SAME_MARGIN_TOL = 3.0  # pt: aynı marj sayılacak x0 salınımı
 MAX_NUMBER_SKIP = 3  # metin katmanından hiç çıkmayan soru numarası için ileri bakma sınırı
@@ -390,17 +440,8 @@ class Question:
     y1: float
 
 
-def next_word_on_line(page: Page, cand: Word) -> Word | None:
-    same_line = [
-        w for w in page.words
-        if w is not cand and abs(w.y0 - cand.y0) < 3 and w.x0 > cand.x1
-    ]
-    if not same_line:
-        return None
-    return min(same_line, key=lambda w: w.x0)
-
-
-def extract_questions(pages: list[Page], profile: Profile) -> list[Question]:
+def extract_questions(pages: list[Page], profile: Profile,
+                      tight_bottom: bool = True) -> list[Question]:
     """Sayfa sayfa ilerleyip 1'den başlayan artan diziyi kuran adayları
     gerçek soru kabul eder; ders değişiminde numaralandırma 1'e döner.
     Ders başlığı olmayan sayfalar (kapak, cevap anahtarı, kurallar) ve
@@ -412,8 +453,8 @@ def extract_questions(pages: list[Page], profile: Profile) -> list[Question]:
     sayfadaki adaylar arasından her adımda "sıradaki beklenen numara"
     aranır; sıralama yalnızca eşit adaylar arasında karar vermek için
     kullanılır."""
-    subjects = page_subjects(pages, profile)
-    furniture = find_repeating_furniture(pages, subjects)
+    furniture = find_repeating_furniture(pages)
+    subjects = page_subjects(pages, profile, furniture)
     starts = detect_columns(pages, profile, subjects, furniture)
 
     # Aynı numara sayfada birden çok yerde geçebilir (soru içi alt madde).
@@ -585,13 +626,22 @@ def extract_questions(pages: list[Page], profile: Profile) -> list[Question]:
         upper_bound = min(below) - 2 if below else page.height - 20
 
         top = max(y0 - 14, 30)
-        content_bottom = top
-        for cw in page.words:
-            if is_boilerplate_word(cw, page.height, profile):
-                continue
-            if x0 - 1 <= cw.x0 < x1 and top <= cw.y0 < upper_bound:
-                content_bottom = max(content_bottom, cw.y1)
-        y1 = min(content_bottom + CONTENT_PAD, upper_bound)
+        if tight_bottom:
+            # Metin katmanı eksiksiz olduğunda içeriğin gerçekten bittiği
+            # yere kadar kırpılır (aradaki boş alan atılır).
+            content_bottom = top
+            for cw in page.words:
+                if is_boilerplate_word(cw, page.height, profile):
+                    continue
+                if x0 - 1 <= cw.x0 < x1 and top <= cw.y0 < upper_bound:
+                    content_bottom = max(content_bottom, cw.y1)
+            y1 = min(content_bottom + CONTENT_PAD, upper_bound)
+        else:
+            # OCR'da kelime kapsamı eksiksiz değildir; son satır (çoğu kez
+            # şıklar) hiç okunmamış olabilir. Böyle bir durumda "içerik
+            # burada bitti" demek şıkları kesmek demek olur — bu yüzden
+            # bandın tamamı alınır. Fazla boşluk zararsız, eksik şık değil.
+            y1 = upper_bound
 
         questions.append(
             Question(number=number, subject=subject or "bilinmiyor", page=page_index,
@@ -623,44 +673,290 @@ def extraction_report(questions: list[Question]) -> dict:
     return report
 
 
-def render_pages(pdf_path: Path, out_dir: Path, dpi: int = 300):
+def render_pages(pdf_path: Path, out_dir: Path, dpi: int = 300) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["pdftoppm", "-png", "-r", str(dpi), str(pdf_path), str(out_dir / "page")],
         check=True,
     )
+    return sorted(out_dir.glob("page-*.png"))
 
 
-def crop_questions(pdf_path: Path, out_dir: Path, profile: Profile = MEB_LGS_PROFILE, dpi: int = 300):
-    from PIL import Image
+# ───────────────────────── Metin kaynakları (backend) ─────────────────────
+#
+# Motorun tamamı (sütun tespiti, sıra doğrulama, kırpma) yalnızca
+# "konumlu kelime" listesi üzerinde çalışır. Bu yüzden kelimelerin NEREDEN
+# geldiği değiştirilebilir: PDF'in kendi metin katmanı ya da sayfa
+# görüntüsü üzerinde OCR. Eğriye çevrilmiş / bozuk fontlu kitapçıklar
+# yalnızca bu kaynağı değiştirerek işlenebilir hale gelir.
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+
+def words_from_pdf(pdf_path: Path, out_dir: Path) -> list[Page]:
+    """PDF'in gömülü metin katmanı (hızlı, ücretsiz, birebir doğru)."""
     bbox_path = out_dir / "bbox.html"
     subprocess.run(["pdftotext", "-bbox", str(pdf_path), str(bbox_path)], check=True)
-    pages = parse_bbox(bbox_path)
-    if not any(p.words for p in pages):
-        raise RuntimeError(
-            "Bu PDF'te metin katmanı yok (muhtemelen taranmış görüntü) — "
-            "bu araç sadece native metin PDF'lerde çalışır, taranmış "
-            "kitapçıklar için OCR/vision tabanlı ayrı bir motor gerekir."
-        )
-    questions = extract_questions(pages, profile)
-    report = extraction_report(questions)
+    return parse_bbox(bbox_path)
 
+
+MIN_OCR_CONF = 45.0        # gövde metni için asgari güven
+MIN_OCR_NUMBER_CONF = 70.0  # soru numarası için: yanlış numara diziyi bozar
+
+
+def _tesseract_tsv(image: Path, lang: str, psm: str, scale: float,
+                   dx: float = 0.0, dy: float = 0.0,
+                   min_conf: float = MIN_OCR_CONF) -> list[Word]:
+    proc = subprocess.run(
+        ["tesseract", str(image), "stdout", "-l", lang, "--psm", psm, "tsv"],
+        check=True, capture_output=True, text=True,
+    )
+    words: list[Word] = []
+    for line in proc.stdout.splitlines()[1:]:
+        parts = line.split("\t")
+        if len(parts) < 12:
+            continue
+        left, top, w, h = (float(parts[6]), float(parts[7]),
+                           float(parts[8]), float(parts[9]))
+        conf, text = parts[10], parts[11].strip()
+        if not text or conf in ("-1", ""):
+            continue
+        try:
+            if float(conf) < min_conf:
+                continue
+        except ValueError:
+            continue
+        words.append(Word(left * scale + dx, top * scale + dy,
+                          (left + w) * scale + dx, (top + h) * scale + dy,
+                          text, float(conf)))
+    return words
+
+
+NIM_OCR_URL = "https://ai.api.nvidia.com/v1/cv/nvidia/nemoretriever-ocr-v1"
+
+
+def words_from_nim(page_images: list[Path], dpi: int, api_key: str,
+                   url: str = NIM_OCR_URL, min_conf: float = 0.5) -> list[Page]:
+    """NVIDIA NIM OCR (nemoretriever-ocr-v1 / paddleocr) ile kelime + konum.
+
+    Tesseract ile aynı sözleşmeyi döndürür (PDF punto'suna çevrilmiş Word
+    listesi), bu yüzden motorun geri kalanı değişmeden çalışır. NIM'in
+    tanıma doğruluğu tesseract'tan yüksek olduğu için özellikle eğriye
+    çevrilmiş / süslü fontlu kitapçıklarda daha az soru kaçar.
+
+    Kullanım:
+        export NVIDIA_API_KEY=nvapi-...
+        crop_questions(pdf, out, profile, source="nim")
+
+    NOT: Bu ortamdan NVIDIA uçlarına ağ erişimi kapalı olduğu için istek
+    biçimi belgelenen sözleşmeye göre yazıldı, canlı doğrulanamadı. İlk
+    çalıştırmada yanıt şeması farklı gelirse `_nim_detections` içindeki
+    alan adları tek noktadan güncellenir."""
+    import base64
+    import urllib.request
+
+    scale = 72.0 / dpi
+    pages: list[Page] = []
+    for i, img_path in enumerate(page_images, start=1):
+        with Image.open(img_path) as im:
+            width, height = im.width * scale, im.height * scale
+            px_w, px_h = im.width, im.height
+        payload = json.dumps({
+            "input": [{
+                "type": "image_url",
+                "url": "data:image/png;base64," +
+                       base64.b64encode(img_path.read_bytes()).decode(),
+            }]
+        }).encode()
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Accept": "application/json",
+                     "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            body = json.loads(resp.read())
+
+        page = Page(index=i, width=width, height=height)
+        page.words = _nim_detections(body, px_w, px_h, scale, min_conf)
+        pages.append(page)
+    return pages
+
+
+def _nim_detections(body: dict, px_w: int, px_h: int, scale: float,
+                    min_conf: float) -> list[Word]:
+    """NIM yanıtındaki metin kutularını Word'e çevirir. Koordinatlar
+    belgelenen biçimde [0,1] aralığında normalize gelir; 1'den büyük
+    değerler görülürse piksel kabul edilip öyle ölçeklenir."""
+    out: list[Word] = []
+    data = body.get("data") or body.get("predictions") or []
+    for item in data:
+        for det in (item.get("text_detections") or item.get("detections") or []):
+            text = (det.get("text") or
+                    (det.get("text_prediction") or {}).get("text") or "").strip()
+            conf = float(det.get("confidence", det.get("score", 1.0)))
+            if not text or conf < min_conf:
+                continue
+            poly = (det.get("bounding_box") or {}).get("points") or det.get("polygon")
+            if not poly:
+                continue
+            xs = [float(p[0] if isinstance(p, (list, tuple)) else p["x"]) for p in poly]
+            ys = [float(p[1] if isinstance(p, (list, tuple)) else p["y"]) for p in poly]
+            if max(xs) <= 1.0 and max(ys) <= 1.0:      # normalize -> piksel
+                xs = [x * px_w for x in xs]
+                ys = [y * px_h for y in ys]
+            out.append(Word(min(xs) * scale, min(ys) * scale,
+                            max(xs) * scale, max(ys) * scale,
+                            text, conf * 100.0))
+    return out
+
+
+def column_left_edges(pages: list[Page], max_edges: int = 4) -> list[float]:
+    """Gövde metninin sütun sol kenarları. Sütunlarda satırların hemen
+    hepsi tam marjdan başladığı için bu konumlar x0 histogramının en güçlü
+    tepeleridir."""
+    counts: dict = {}
+    for p in pages:
+        for w in p.words:
+            counts[round(w.x0)] = counts.get(round(w.x0), 0) + 1
+    if not counts:
+        return []
+    total = sum(counts.values())
+    peaks = sorted(x for x, n in counts.items() if n >= max(5, total * 0.02))
+    edges: list[float] = []
+    for x in peaks:
+        if not edges or x - edges[-1] > 25:
+            edges.append(float(x))
+    return edges[:max_edges]
+
+
+# Soru numarası, gövde metninin SOLUNDA asılı girintide durur (gövde
+# "54pt"den başlıyorsa numara ~"37pt"dedir). Bu yüzden şerit, tespit edilen
+# gövde kenarından belirgin biçimde sola taşar.
+STRIP_LEFT_PAD = 34.0
+STRIP_RIGHT_PAD = 40.0
+
+
+def words_from_tesseract(page_images: list[Path], dpi: int, lang: str = "tur") -> list[Page]:
+    """Yerel OCR (tesseract). Sayfa görüntülerinden kelime + konum çıkarır;
+    koordinatlar piksel'den PDF punto'suna çevrilir, böylece motorun geri
+    kalanı PDF metin katmanıyla aynı şekilde çalışır.
+
+    İki geçişlidir. Tam sayfa taraması gövde metnini verir ama soru
+    numaralarını sık kaçırır: numara, grafiklerin ortasında tek başına
+    duran küçük/renkli bir öğe olduğu için sayfa analizi onu eler. Bu
+    yüzden ikinci geçişte sütun marjlarındaki dar şeritler ayrıca taranır
+    (dar şeritte rakam, çevresindeki grafiklerle yarışmadığı için güvenle
+    okunur)."""
+    scale = 72.0 / dpi
+    pages: list[Page] = []
+    for i, img_path in enumerate(page_images, start=1):
+        with Image.open(img_path) as im:
+            width, height = im.width * scale, im.height * scale
+        page = Page(index=i, width=width, height=height)
+        # Numara biçimli belirteçlerde eşik daha yüksek: yanlış okunan tek
+        # bir rakam, sıra doğrulamasını yanlış soruya kilitleyebiliyor.
+        page.words = [
+            w for w in _tesseract_tsv(img_path, lang, "3", scale)
+            if not QNUM_LOOSE_RE.match(w.text) or w.conf >= MIN_OCR_NUMBER_CONF
+        ]
+        pages.append(page)
+
+    edges = column_left_edges(pages)
+    if not edges:
+        return pages
+
+    px = dpi / 72.0
+    strip_dir = page_images[0].parent / "_strips"
+    strip_dir.mkdir(exist_ok=True)
+    for page, img_path in zip(pages, page_images):
+        with Image.open(img_path) as im:
+            for k, edge in enumerate(edges):
+                left = max(int((edge - STRIP_LEFT_PAD) * px), 0)
+                right = min(int((edge + STRIP_RIGHT_PAD) * px), im.width)
+                if right - left < 10:
+                    continue
+                strip_path = strip_dir / f"p{page.index:03d}_c{k}.png"
+                im.crop((left, 0, right, im.height)).save(strip_path)
+                for w in _tesseract_tsv(strip_path, lang, "6", scale,
+                                        dx=left * scale,
+                                        min_conf=MIN_OCR_NUMBER_CONF):
+                    if not QNUM_LOOSE_RE.match(w.text):
+                        continue
+                    # Profiller "12." biçimini bekler; OCR noktayı bazen
+                    # düşürüyor ya da virgül okuyor -> tek biçime getir.
+                    w.text = w.text.rstrip(".,)") + "."
+                    already = any(
+                        abs(o.x0 - w.x0) < 6 and abs(o.y0 - w.y0) < 6
+                        for o in page.words
+                    )
+                    if not already:
+                        page.words.append(w)
+    return pages
+
+
+def missing_ratio(report: dict) -> tuple[int, int]:
     total_expected = sum(r["en_yuksek_numara"] for r in report.values())
     total_missing = sum(len(r["eksik"]) for r in report.values())
-    if not questions or total_missing > total_expected * UNRELIABLE_MISSING_RATIO:
+    return total_missing, total_expected
+
+
+def crop_questions(pdf_path: Path, out_dir: Path, profile: Profile = MEB_LGS_PROFILE,
+                   dpi: int = 300, source: str = "auto", ocr_lang: str = "tur"):
+    """source:
+    - "pdf"  : yalnızca gömülü metin katmanı
+    - "ocr"  : yalnızca yerel OCR (tesseract)
+    - "nim"  : yalnızca NVIDIA NIM OCR (NVIDIA_API_KEY gerekir)
+    - "auto" : önce PDF metni; sonuç yetersizse (eğriye çevrilmiş yazı,
+               bozuk font, taranmış sayfa) OCR'a düşer. NVIDIA_API_KEY
+               tanımlıysa OCR olarak NIM, değilse tesseract kullanılır.
+    """
+    import os
+
+    api_key = os.environ.get("NVIDIA_API_KEY")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    render_dir = out_dir / "_pages"
+    page_images = render_pages(pdf_path, render_dir, dpi=dpi)
+
+    def attempt(kind):
+        if kind == "pdf":
+            pages = words_from_pdf(pdf_path, out_dir)
+        elif kind == "nim":
+            if not api_key:
+                raise RuntimeError(
+                    "NIM OCR için NVIDIA_API_KEY ortam değişkeni gerekli."
+                )
+            pages = words_from_nim(page_images, dpi, api_key)
+        else:
+            pages = words_from_tesseract(page_images, dpi, ocr_lang)
+        if not any(p.words for p in pages):
+            return None, {}, kind
+        qs = extract_questions(pages, profile, tight_bottom=(kind == "pdf"))
+        return qs, extraction_report(qs), kind
+
+    fallback = "nim" if api_key else "ocr"
+    attempts = {"pdf": ["pdf"], "ocr": ["ocr"], "nim": ["nim"],
+                "auto": ["pdf", fallback]}[source]
+    questions, report, used = None, {}, None
+    for kind in attempts:
+        qs, rep, k = attempt(kind)
+        miss, exp = missing_ratio(rep) if rep else (1, 1)
+        if qs and miss <= exp * UNRELIABLE_MISSING_RATIO:
+            questions, report, used = qs, rep, k
+            break
+        # elde edilen en iyi sonucu sakla (hepsi başarısızsa raporlamak için)
+        if questions is None or (rep and miss < missing_ratio(report)[0]):
+            questions, report, used = qs, rep, k
+
+    miss, exp = missing_ratio(report) if report else (1, 1)
+    if not questions or miss > exp * UNRELIABLE_MISSING_RATIO:
         raise RuntimeError(
-            "Bu kitapçığın metin katmanı soru çıkarmak için yetersiz "
-            f"({total_missing}/{total_expected} soru numarası okunamadı). "
-            "Yazılar büyük ihtimalle eğriye (outline) çevrilmiş ya da "
-            "gömülü fontun karakter eşlemesi bozuk; bu dosya için "
-            "OCR/vision tabanlı motor gerekir. Kısmi/yanlış kırpma "
+            f"Soru çıkarılamadı ({miss}/{exp} soru numarası okunamadı; "
+            f"denenen kaynak: {', '.join(attempts)}). Kısmi/yanlış kırpma "
             "üretmemek için işlem durduruldu."
         )
-
-    render_dir = out_dir / "_pages"
-    render_pages(pdf_path, render_dir, dpi=dpi)
+    if used != "pdf":
+        engine = "NIM OCR" if used == "nim" else "yerel OCR (tesseract)"
+        print(f"BİLGİ: PDF metin katmanı yetersizdi, {engine} ile çıkarıldı.",
+              file=sys.stderr)
 
     scale = dpi / 72.0
     crops_dir = out_dir / "crops"

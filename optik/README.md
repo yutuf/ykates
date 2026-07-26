@@ -9,7 +9,7 @@ Taranmış (fotokopi/scan) PDF'lerde çalışmaz — native metin katmanı gerek
 ## Kurulum
 
 ```
-apt-get install -y poppler-utils
+apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-tur
 pip install Pillow
 ```
 
@@ -19,8 +19,46 @@ pip install Pillow
 python3 crop_booklet.py kitapcik.pdf ./cikti
 ```
 
-Çıktı: `./cikti/crops/<ders>_soru<no>.png` + `./cikti/manifest.json`
-(her sorunun numarası, dersi, kaynak sayfası, bbox koordinatları).
+Çıktı: `./cikti/crops/<ders>_soru<no>.png`, `./cikti/manifest.json`
+(numara, ders, kaynak sayfa, bbox) ve `./cikti/rapor.json` (çıkarılamayan
+soru numaraları).
+
+## Metin kaynakları
+
+Motorun tamamı yalnızca "konumlu kelime" listesi üzerinde çalışır, bu
+yüzden kelimelerin nereden geldiği değiştirilebilir (`source` parametresi):
+
+| source | Kaynak | Ne zaman |
+|---|---|---|
+| `pdf` | PDF'in gömülü metin katmanı | Hızlı, ücretsiz, birebir doğru |
+| `ocr` | Yerel OCR (tesseract) | Metin katmanı yoksa/bozuksa |
+| `nim` | NVIDIA NIM OCR | Aynı durum, daha yüksek doğruluk |
+| `auto` | Önce `pdf`, yetersizse OCR | **Varsayılan** |
+
+`auto` modunda `NVIDIA_API_KEY` tanımlıysa OCR olarak NIM, değilse
+tesseract kullanılır — yani anahtar eklemek dışında bir değişiklik
+gerekmez.
+
+### NIM hakkında
+
+`words_from_nim()` NIM OCR'ı (nemoretriever-ocr-v1) tesseract ile aynı
+sözleşmeye bağlar. **Bu ortamdan NVIDIA uçlarına ağ erişimi kapalı
+olduğu için istek/yanıt biçimi belgelenen sözleşmeye göre yazıldı, canlı
+doğrulanamadı.** Yanıt şeması farklı gelirse alan adları tek bir yerden
+(`_nim_detections`) güncellenir.
+
+### OCR neden iki geçişli
+
+Tam sayfa taraması gövde metnini iyi okur ama soru numaralarını sık
+kaçırır: numara, grafiklerin ortasında tek başına duran küçük/renkli bir
+öğedir ve sayfa analizi onu eler. Bu yüzden ikinci geçişte sütun
+marjlarındaki dar şeritler ayrıca taranır — dar şeritte rakam çevresindeki
+grafiklerle yarışmadığı için güvenle okunur. Yarış kitapçığında bu ikinci
+geçiş sonucu 53 → 83 soruya çıkardı.
+
+Ayrıca numara biçimli belirteçlerde OCR güven eşiği daha yüksek tutulur
+(yanlış okunan tek bir rakam sıra doğrulamasını yanlış soruya kilitler);
+bu da 83 → 88'e taşıdı.
 
 ## Yayınevi profilleri
 
@@ -53,14 +91,14 @@ Yeni bir yayınevi eklemek için:
 
 ## Doğrulama durumu
 
-| Kitapçık | Sonuç |
-|---|---|
-| MEB 2024 Sayısal | 40/40 |
-| MEB 2024 Sözel | 50/50 |
-| Sivas Köprü Mat. 2019-20 / 2020-21 / 2021-22 | 20/20 (her biri) |
-| Sivas Köprü tam LGS Deneme 7 (45 sayfa, 6 ders) | 88/90 |
-| Yarış Deneme 4 | reddedildi (metin katmanı yetersiz) |
-| Fikri Bilim, KerimHoca | işlenemiyor (aşağıya bkz.) |
+| Kitapçık | Kaynak | Sonuç |
+|---|---|---|
+| MEB 2024 Sayısal | pdf | 40/40 |
+| MEB 2024 Sözel | pdf | 50/50 |
+| Sivas Köprü Mat. 2019-20 / 2020-21 / 2021-22 | pdf | 20/20 (her biri) |
+| Sivas Köprü tam LGS Deneme 7 (45 sayfa, 6 ders) | pdf | 88/90 |
+| Yarış Deneme 4 (metin eğriye çevrilmiş) | ocr | 88/90 |
+| Fikri Bilim, KerimHoca | — | henüz denenmedi |
 
 Sivas Köprü Deneme 7'deki 2 eksik soru İngilizce bölümünde: o sayfalarda
 gömülü fontun karakter eşlemesi bozuk olduğu için soru numaraları metin
@@ -69,24 +107,27 @@ ve `stderr`'e hangi soruların çıkarılamadığını yazar.
 
 ## Bilinen sınırlar
 
-Aşağıdaki üç durumda metin tabanlı yöntem yapısal olarak çalışmaz; ortak
-çözüm OCR/vision tabanlı ikinci bir motordur (NIM üzerinden bir layout/OCR
-modeli değerlendirilecek):
+Aşağıdaki durumlarda PDF metin katmanı kullanılamaz; hepsinin çözümü OCR
+kaynağına geçmektir (`auto` bunu kendiliğinden yapar):
 
 - **Taranmış PDF** — metin katmanı hiç yok.
 - **Eğriye çevrilmiş (outline) metin** — yayınevi fontları vektör çizime
   dönüştürmüş; `pdftotext` yalnızca birkaç kırıntı görür. Yarış örneği
-  böyle: 50 soru numarasının 33'ü okunamıyor.
-- **Bozuk font kodlaması** — gömülü fontun ToUnicode eşlemesi kırık,
-  harfler okunaksız çıkıyor (ör. ilovepdf.com'dan geçmiş Fikri Bilim
-  dosyası; Sivas Deneme 7'nin İngilizce bölümü kısmen).
-- **Rozet tarzı soru numaraları** — KerimHoca numarayı düz metin yerine
-  renkli rozet grafiği içinde basıyor, numara parçalanmış glif dizileri
-  olarak çıkıyor.
+  böyle: 50 soru numarasının 33'ü metin katmanında yok, OCR ile 88/90.
+- **Bozuk font kodlaması** — gömülü fontun ToUnicode eşlemesi kırık
+  (ör. ilovepdf.com'dan geçmiş Fikri Bilim dosyası; Sivas Deneme 7'nin
+  İngilizce bölümü kısmen).
+- **Rozet tarzı soru numaraları** — KerimHoca numarayı renkli rozet
+  grafiği içinde basıyor.
 
-Motor bu dosyalarda **kısmi/yanlış kırpma üretmek yerine hata verip
-durur** (`UNRELIABLE_MISSING_RATIO` eşiği): sessizce bozuk veri üretmek,
-açıkça reddetmekten daha kötüdür.
+Hiçbir kaynak yeterli sonuç veremezse motor **kısmi/yanlış kırpma üretmek
+yerine hata verip durur** (`UNRELIABLE_MISSING_RATIO` eşiği): sessizce
+bozuk veri üretmek, açıkça reddetmekten daha kötüdür.
+
+OCR yolunda alt kırpma sınırı bilinçli olarak gevşek tutulur (soru bandının
+tamamı alınır). OCR kelime kapsamı eksiksiz olmadığı için "içerik burada
+bitti" demek şıkları kesme riski taşır; fazla boşluk zararsız, eksik şık
+değil.
 
 Ayrıca sıkı kırpma (soru içeriğinin gerçek bittiği yerde durma) filigran
 kelime listesine dayanır; filigranı olmayan yayınevlerinde bu liste boş
