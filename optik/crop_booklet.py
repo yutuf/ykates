@@ -101,6 +101,14 @@ class Profile:
     # Sayfa altındaki sayfa-numarası şeridi (bu bant sıkı kırpmada içerik
     # sayılmaz).
     footer_band: float = 60.0
+    # Ders adı her sayfada tekrar etmeyen yayınevlerinde (yalnızca ilk
+    # sayfada "MATEMATİK" yazıp sonrasında sadece "SAYISAL BÖLÜM" gibi genel
+    # bir şerit tekrarlayanlar), bir sayfanın "ders adı yok ama yine de
+    # içerik sayfası" olduğunu anlamak için bu genel işaretler kullanılır.
+    # Boş bırakılırsa (varsayılan) sadece açık ders adı olan sayfalar
+    # içerik sayılır — ders devam ettirilmez (MEB gibi her sayfada ders adı
+    # tekrar eden yayınevleri için doğru davranış).
+    content_markers: frozenset = frozenset()
 
 
 MEB_LGS_PROFILE = Profile(
@@ -122,57 +130,132 @@ MEB_LGS_PROFILE = Profile(
     footer_band=60.0,
 )
 
+# Sivas Köprü Yayınları — tek ders (Matematik) deneme kitapçığı. Ders adı
+# yalnızca ilk sayfada yazıyor, sonraki sayfalarda sadece "SAYISAL BÖLÜM"
+# şeridi tekrarlanıyor -> content_markers ile devam ettiriliyor. Filigran
+# yok, talimat satırı numara kalıbı kullanmıyor (numarasız düz metin).
+SIVAS_KOPRU_PROFILE = Profile(
+    name="sivas_kopru",
+    qnum_pattern=re.compile(r"^(\d{1,2})\.$"),
+    subject_keywords={"MATEMATİK": "matematik"},
+    content_markers=frozenset({"BÖLÜM", "İZLEME"}),
+    answer_key_markers=("CEVAP", "ANAHTARI"),
+    watermark_words=frozenset(),
+    preamble_next_words=frozenset(),
+    margin_slack=13.0,
+    footer_band=60.0,
+)
+
 SINGLE_LETTER_RE = re.compile(r"^[A-ZÇĞİÖŞÜ]$")
 
 
+def tr_upper(s: str) -> str:
+    """Python'un varsayılan .upper()'ı Türkçe I/İ ayrımını bozar (baskısız
+    'i' -> 'I' olur, 'İ' değil). Bazı yayınevleri başlıkları büyük harfle
+    ('MATEMATİK'), bazıları normal harfle ('Matematik') yazıyor — bu ayrımı
+    önceden düzeltip karşılaştırmayı harf büyüklüğünden bağımsız yapar."""
+    return s.replace("i", "İ").replace("ı", "I").upper()
+
+
 def is_answer_key_page(page: Page, profile: Profile) -> bool:
-    text = " ".join(w.text for w in page.words)
-    return all(marker in text for marker in profile.answer_key_markers)
+    text = tr_upper(" ".join(w.text for w in page.words))
+    return all(tr_upper(marker) in text for marker in profile.answer_key_markers)
 
 
-def subject_for_page(page: Page, profile: Profile) -> str | None:
-    """Ders adı sayfa başlığında (üstte) büyük harfle geçer."""
-    if is_answer_key_page(page, profile):
-        return None
+def explicit_subject_for_page(page: Page, profile: Profile) -> str | None:
+    """Sayfa başlığında (üstte) geçen ders adını arar (harf büyüklüğünden
+    bağımsız) — sadece BU sayfada açıkça yazılıysa döner."""
     header_words = [w for w in page.words if w.y0 < profile.header_y_max]
-    text = " ".join(w.text for w in header_words)
+    text = tr_upper(" ".join(w.text for w in header_words))
     for keyword, subject_id in profile.subject_keywords.items():
-        if keyword in text:
+        if tr_upper(keyword) in text:
             return subject_id
     return None
+
+
+def is_generic_content_page(page: Page, profile: Profile) -> bool:
+    """content_markers boşsa hiçbir sayfa 'genel içerik' sayılmaz (ders adı
+    her sayfada açıkça tekrar etmeli). Doluysa, o genel şeritlerden biri
+    başlıkta geçen her sayfa içerik sayılır (ama hangi ders olduğu bir
+    önceki açık eşleşmeden miras alınır)."""
+    if not profile.content_markers:
+        return False
+    header_words = [w for w in page.words if w.y0 < profile.header_y_max]
+    text = tr_upper(" ".join(w.text for w in header_words))
+    return any(tr_upper(marker) in text for marker in profile.content_markers)
+
+
+def page_subjects(pages: list[Page], profile: Profile) -> dict:
+    """Her sayfanın dersini belirler. Birçok yayınevi ders adını SADECE o
+    dersin ilk sayfasında yazar, sonraki sayfalarda sadece genel bir bölüm
+    şeridi ("SAYISAL BÖLÜM" gibi) tekrar eder — bu yüzden başlıkta açık ders
+    adı yoksa ama sayfa yine de `content_markers`'tan biriyle "bu içerik
+    sayfası" diye işaretliyse bir önceki sayfanın dersi devam ettirilir.
+    Ne açık ders adı ne genel işaret olan sayfalar (kapak, cevap anahtarı,
+    kural sayfası vb.) HARİÇ TUTULUR — miras alınmaz, çünkü bu tür sayfalar
+    kendi içinde soru numarasına benzeyen numaralı listeler (kurallar,
+    talimatlar) içerebilir ve yanlışlıkla soru sanılabilir."""
+    result: dict = {}
+    last: str | None = None
+    for page in pages:
+        if is_answer_key_page(page, profile):
+            result[page.index] = None
+            last = None
+            continue
+        explicit = explicit_subject_for_page(page, profile)
+        if explicit is not None:
+            result[page.index] = explicit
+            last = explicit
+        elif page.index > 1 and last is not None and is_generic_content_page(page, profile):
+            result[page.index] = last
+        else:
+            result[page.index] = None
+    return result
+
+
+def in_footer_band(w: Word, page_height: float, profile: Profile) -> bool:
+    """Sayfa altındaki sabit şerit (sayfa no., '8. SINIF' gibi tekrarlayan
+    etiketler) — buradaki kelimeler ne soru numarası adayı ne de içerik
+    sınırı hesabına dahil edilir."""
+    return w.y0 > page_height - profile.footer_band
 
 
 def is_boilerplate_word(w: Word, page_height: float, profile: Profile) -> bool:
     """Filigran/mühür metni gerçek (siyah) mürekkeple basılı olduğundan
     renkten ayırt edilemez; sabit kelime dağarcığı + izole tek harf rozetler
-    + sayfa altındaki sayfa-numarası ile eleniyor."""
+    + sayfa altındaki sabit şerit ile eleniyor."""
     if w.text in profile.watermark_words:
         return True
     if SINGLE_LETTER_RE.match(w.text):
         return True
-    if w.text.isdigit() and w.y0 > page_height - profile.footer_band:
+    if in_footer_band(w, page_height, profile):
         return True
     return False
 
 
 # ─────────────────────────── Sütun tespiti (otomatik) ───────────────────
 
-def detect_columns(pages: list[Page], profile: Profile) -> list[float]:
+def detect_columns(pages: list[Page], profile: Profile, subjects: dict) -> list[tuple]:
     """Sütun sayısını VE konumunu sabit varsaymak yerine dokümandan öğrenir:
-    tüm soru-numarası adaylarının x0'larını kümeler (sağa-yaslı numaralama
-    yüzünden tek/çift haneli sayılar ~margin_slack kadar kayar, bu yüzden
-    kümeleme eşiği margin_slack tabanlıdır). En az 3 kez görülen kümeler
-    gerçek bir sütun başlangıcı kabul edilir; soru içi gürültü (alt madde
-    numaraları vb.) çoğunlukla tek seferlik olduğundan elenir."""
+    tüm soru-numarası adaylarının x0'larını kümeler. Sağa-yaslı numaralama
+    yüzünden aynı sütundaki numaralar bile birkaç farklı x0'da başlayabilir
+    (çift haneli sayı bir hane daha sola başlar; dar "1" rakamı da geniş
+    rakamlara göre daha sağda başlar) — bu yüzden zincirleme boşluk eşiğiyle
+    kümelenir. Her kümenin GÖZLEMLENEN [min,max] aralığı döndürülür (kabul
+    penceresi için ayrı bir sabit tahmin etmeye gerek kalmaz). En az 3 kez
+    görülen kümeler gerçek bir sütun kabul edilir; soru içi gürültü (alt
+    madde numaraları vb.) çoğunlukla tek seferlik olduğundan elenir."""
     xs = []
     for page in pages:
-        if subject_for_page(page, profile) is None:
+        if subjects.get(page.index) is None:
             continue
         for w in page.words:
+            if in_footer_band(w, page.height, profile):
+                continue
             if profile.qnum_pattern.match(w.text):
                 xs.append(w.x0)
     if not xs:
-        return [0.0]
+        return [(0.0, 0.0)]
 
     xs.sort()
     clusters: list[list[float]] = [[xs[0]]]
@@ -182,28 +265,30 @@ def detect_columns(pages: list[Page], profile: Profile) -> list[float]:
         else:
             clusters.append([x])
 
-    starts = [min(c) for c in clusters if len(c) >= 3]
-    return sorted(starts) if starts else [min(xs)]
+    ranges = [(min(c), max(c)) for c in clusters if len(c) >= 2]
+    return sorted(ranges) if ranges else [(min(xs), max(xs))]
 
 
-def column_index(x0: float, starts: list[float], profile: Profile) -> int | None:
-    """x0'ı en yakın sütun başlangıcına eşler; hiçbirine (marj toleransı
-    içinde) uymuyorsa None döner (gerçek soru numarası değildir)."""
-    for i, start in enumerate(starts):
-        if start - 1.0 <= x0 <= start + profile.margin_slack:
+def column_index(x0: float, ranges: list[tuple], profile: Profile) -> int | None:
+    """x0'ı en yakın sütun aralığına eşler; hiçbirine uymuyorsa None döner
+    (gerçek soru numarası değildir)."""
+    for i, (lo, hi) in enumerate(ranges):
+        if lo - 1.0 <= x0 <= hi + 2.0:
             return i
     return None
 
 
-def find_question_candidates(page: Page, starts: list[float], profile: Profile):
+def find_question_candidates(page: Page, ranges: list[tuple], profile: Profile):
     """Sayfadaki numara kalıbındaki kelimeleri okuma sırasına (sütun sırası,
     her sütun içinde üstten alta) göre döndürür."""
     cands = []
     for w in page.words:
+        if in_footer_band(w, page.height, profile):
+            continue
         m = profile.qnum_pattern.match(w.text)
         if not m:
             continue
-        col = column_index(w.x0, starts, profile)
+        col = column_index(w.x0, ranges, profile)
         if col is None:
             continue
         cands.append((col, w.y0, int(m.group(1)), w))
@@ -237,11 +322,12 @@ def extract_questions(pages: list[Page], profile: Profile) -> list[Question]:
     dizi kuran adayları gerçek soru kabul eder (resetler yeni ders demektir).
     Ders başlığı olmayan sayfalar (kapak, cevap anahtarı, kurallar) ve
     talimat satırları baştan elenir."""
-    starts = detect_columns(pages, profile)
+    subjects = page_subjects(pages, profile)
+    starts = detect_columns(pages, profile, subjects)
 
     raw = []  # (page_index, col, y0, number, word, subject)
     for page in pages:
-        subject = subject_for_page(page, profile)
+        subject = subjects.get(page.index)
         if subject is None:
             continue
         for col, y0, number, w in find_question_candidates(page, starts, profile):
@@ -267,28 +353,12 @@ def extract_questions(pages: list[Page], profile: Profile) -> list[Question]:
             last_subject = subject
         # else: dizinin dışında (talimat metni, soru içi madde vb.) -> atla
 
-    # Bir sayfada sadece TEK sütun dolu ise (diğer sütunlarda kabul edilmiş
-    # soru yoksa), o sayfa tam genişlik düzenindedir (grafik/tablo içeren
-    # sorularda sıkça görülür) -> sütunlara bölmeden tüm sayfa genişliğini
-    # kullan. Birden fazla sütun doluysa tespit edilen sütun sınırları
-    # arasında böl.
-    cols_per_page: dict[int, set] = {}
-    for p, col, *_ in accepted:
-        cols_per_page.setdefault(p, set()).add(col)
-
     CONTENT_PAD = 10.0  # son satırın altına bırakılan küçük nefes payı
 
     questions: list[Question] = []
     pages_by_index = {p.index: p for p in pages}
     for i, (page_index, col, y0, number, w, subject) in enumerate(accepted):
         page = pages_by_index[page_index]
-        full_width_page = len(cols_per_page[page_index]) <= 1
-        if full_width_page:
-            x0, x1 = 0.0, page.width
-        else:
-            x0 = max(starts[col] - 6, 0.0)
-            # bir sonraki sütunun başlangıcının hemen öncesine kadar kırp
-            x1 = starts[col + 1] - 4 if col + 1 < len(starts) else page.width
 
         # dikey üst sınır: aynı sayfa+sütunda bir sonraki soru var mı?
         upper_bound = page.height - 20  # alt kenar boşluğu (sayfa no. şeridi)
@@ -299,6 +369,20 @@ def extract_questions(pages: list[Page], profile: Profile) -> list[Question]:
                 break
             if n_page != page_index:
                 break
+
+        # Aynı sayfada, bu sorunun dikey aralığında BAŞKA bir sütunda soru
+        # var mı? Yoksa bu soru (aynı sayfada başka yerde 2 sütun kullanılsa
+        # bile) tam genişliktedir — bazı yayınevleri bir sayfada tam
+        # genişlik bir soruyla iki yarım genişlik soruyu birlikte kullanır.
+        other_col_in_range = any(
+            n_page == page_index and n_col != col and y0 - 20 <= n_y0 < upper_bound
+            for n_page, n_col, n_y0, *_ in accepted
+        )
+        if other_col_in_range:
+            x0 = max(starts[col][0] - 6, 0.0)
+            x1 = starts[col + 1][0] - 4 if col + 1 < len(starts) else page.width
+        else:
+            x0, x1 = 0.0, page.width
 
         top = max(y0 - 14, 30)
         content_bottom = top
