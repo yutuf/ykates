@@ -1,0 +1,13 @@
+ogrenci_no,ogrenci_ad,ders,soru,isaret
+101,Ali Yılmaz,matematik,1,D
+101,Ali Yılmaz,matematik,2,C
+101,Ali Yılmaz,matematik,3,
+101,Ali Yılmaz,fen_bilimleri,1,C
+101,Ali Yılmaz,fen_bilimleri,2,B
+101,Ali Yılmaz,turkce,1,B
+102,Zeynep Kaya,matematik,1,A
+102,Zeynep Kaya,matematik,2,B
+102,Zeynep Kaya,matematik,3,A
+102,Zeynep Kaya,fen_bilimleri,1,C
+102,Zeynep Kaya,fen_bilimleri,2,A
+102,Zeynep Kaya,turkce,1,D
