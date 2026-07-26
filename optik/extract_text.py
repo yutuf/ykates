@@ -293,6 +293,43 @@ def in_any_box(w, boxes) -> bool:
                and b.y0 - 2 <= w.y0 and w.y1 <= b.y1 + 2 for b in boxes)
 
 
+CROP_PAD = 4.0      # pt: yanlarda ve altta bırakılan ince pay
+# Üstte pay neredeyse yok: sayfa üstbilgisinin ayraç çizgisi soru
+# numarasının hemen üstünde duruyor ve birkaç punto pay onu içeri alıyor.
+CROP_TOP_PAD = 1.0
+
+
+def content_bounds(page, q, prof, figures) -> dict:
+    """Tek parça kırpımın sınırlarını sorunun GERÇEK içeriğinden kurar.
+
+    Sorunun kutusu sayfa genişliğindedir ve numaranın üstünde pay bırakır;
+    o payda sayfa üstbilgisi oturuyor (mühür parçası, pembe süsleme,
+    kitapçık türü rozeti, ayraç çizgisi) ve sayfanın sağ kenar şeridi de
+    kutuya giriyordu. Bunlar soruya ait değil. Sınırlar bu yüzden
+    kelimelerin ve şekillerin kapladığı alandan hesaplanır; üstten de soru
+    numarasının hizasından başlanır."""
+    words = [w for w in page.words
+             if q.x0 - 1 <= w.x0 < q.x1 and q.y0 <= w.y0 < q.y1
+             and w.text not in prof.watermark_words
+             and w.y0 <= page.height - prof.footer_band]
+    if not words and not figures:
+        return {"x0": q.x0, "y0": q.y0, "x1": q.x1, "y1": q.y1, "sayfa": q.page}
+
+    nums = [w.y0 for w in words if prof.qnum_pattern.match(w.text)]
+    top = min(nums) if nums else min(w.y0 for w in words)
+
+    xs0 = [w.x0 for w in words] + [b.x0 for b in figures]
+    xs1 = [w.x1 for w in words] + [b.x1 for b in figures]
+    ys1 = [w.y1 for w in words] + [b.y1 for b in figures]
+    return {
+        "x0": max(min(xs0) - CROP_PAD, 0.0),
+        "y0": max(top - CROP_TOP_PAD, 0.0),
+        "x1": min(max(xs1) + CROP_PAD, page.width),
+        "y1": min(max(ys1) + CROP_PAD, page.height - prof.footer_band),
+        "sayfa": q.page,
+    }
+
+
 def question_text(page, q, prof, is_boilerplate, radicals: list[tuple] = (),
                   figures: list = ()) -> QuestionText:
     # Kırpma tarafındaki eleyici tek harfleri de atar (mühürdeki "A", "B"
@@ -369,8 +406,7 @@ def question_text(page, q, prof, is_boilerplate, radicals: list[tuple] = (),
     q_area = max((q.x1 - q.x0) * (q.y1 - q.y0), 1.0)
     if fig_area / q_area >= FIGURE_HEAVY_RATIO:
         qt.mode = "gorsel"
-        qt.full_crop = {"x0": q.x0, "y0": q.y0, "x1": q.x1, "y1": q.y1,
-                        "sayfa": q.page}
+        qt.full_crop = content_bounds(page, q, prof, figures)
     if len(options) != 4:
         qt.flags.append(f"sik_sayisi={len(options)}")
     return qt
