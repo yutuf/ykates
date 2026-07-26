@@ -34,7 +34,40 @@ OPTION_RE = re.compile(r"^([A-D])\)$")
 class Piece:
     text: str
     x0: float
+    x1: float = 0.0
+    y0: float = 0.0
     kind: str = "base"  # base | sup | sub
+    radical: int | None = None  # altında bulunduğu kök çizgisinin sırası
+
+
+# Kök işareti gömülü fontta bir karakter DEĞİL, vektör çizimidir; bu
+# yüzden metin katmanında hiç görünmez. Ama çizim olarak bulunabilir:
+# ince, yatayda geniş bir "stroke" ve altında kalan rakamlar. Aşağıdaki
+# sınırlar o çizgiyi kutu/tablo kenarlarından ayırır.
+RADICAL_MAX_HEIGHT = 14.0
+RADICAL_MIN_WIDTH = 6.0
+
+
+def radical_spans(page) -> list[tuple]:
+    """Sayfadaki kök çizgilerini (vinculum) döndürür: (x0, x1, y_alt)."""
+    spans = []
+    for d in page.get_drawings():
+        if d["type"] != "s":
+            continue
+        r = d["rect"]
+        if r.height <= RADICAL_MAX_HEIGHT and r.width >= RADICAL_MIN_WIDTH:
+            spans.append((r.x0, r.x1, r.y1))
+    return spans
+
+
+def under_radical(x0: float, x1: float, y0: float, spans: list[tuple]) -> int | None:
+    """Terimin altında bulunduğu kök çizgisinin sırası (yoksa None).
+    Hangi çizgi olduğunu döndürmek gerekir: yan yana iki kök
+    (\\sqrt{2}\\sqrt{3}) tek köke birleştirilmemeli."""
+    for i, (sx0, sx1, sy1) in enumerate(spans):
+        if sx0 - 2 <= x0 and x1 <= sx1 + 2 and -2 <= y0 - (sy1 - 10.0) <= 12.0:
+            return i
+    return None
 
 
 @dataclass
@@ -51,7 +84,7 @@ class QuestionText:
                 "uyarilar": self.flags}
 
 
-def classify(words, baseline_h: float):
+def classify(words, baseline_h: float, radicals: list[tuple] = ()):
     """Her kelimeyi taban / üst simge / alt simge diye ayırır.
 
     Üst simge imzası: puntonun küçülmesi TEK BAŞINA yetmez — çarpım
@@ -65,22 +98,46 @@ def classify(words, baseline_h: float):
         raised = w.y0 < base_top - baseline_h * 0.12
         lowered = w.y0 > base_top + baseline_h * 0.25
         kind = "sup" if (small and raised) else ("sub" if (small and lowered) else "base")
-        out.append(Piece(w.text, w.x0, kind))
+        out.append(Piece(w.text, w.x0, w.x1, w.y0, kind,
+                         under_radical(w.x0, w.x1, w.y0, radicals)))
     return out
 
 
 def render_line(pieces: list[Piece]) -> str:
     """Bir satırı soldan sağa metne çevirir; üst/alt simgeler kendinden
-    önceki terime LaTeX olarak iliştirilir."""
+    önceki terime LaTeX olarak iliştirilir, kök altındaki terimler
+    \\sqrt{} ile sarılır.
+
+    AYNI kök çizgisinin altındaki ardışık parçalar tek bir köke toplanır:
+    "1", ",", "44" ayrı kelimeler olarak gelir ama hepsi tek bir çizginin
+    altındadır -> \\sqrt{1,44}, üç ayrı kök değil."""
     parts: list[str] = []
+    pending: list[str] = []  # aynı kökün altında biriken parçalar
+    pending_id: int | None = None
+
+    def flush():
+        nonlocal pending_id
+        if pending:
+            parts.append("\\sqrt{" + "".join(pending) + "}")
+            pending.clear()
+        pending_id = None
+
     for p in sorted(pieces, key=lambda p: p.x0):
         text = OPERATOR_MAP.get(p.text, p.text)
+        if p.radical is not None:
+            if pending and p.radical != pending_id:
+                flush()
+            pending.append(text)
+            pending_id = p.radical
+            continue
+        flush()
         if p.kind == "sup" and parts:
             parts[-1] = parts[-1] + "^{" + text + "}"
         elif p.kind == "sub" and parts:
             parts[-1] = parts[-1] + "_{" + text + "}"
         else:
             parts.append(text)
+    flush()
     return " ".join(parts)
 
 
@@ -100,7 +157,7 @@ def join_hyphenation(lines: list[str]) -> str:
     return out
 
 
-def question_text(page, q, prof, is_boilerplate) -> QuestionText:
+def question_text(page, q, prof, is_boilerplate, radicals: list[tuple] = ()) -> QuestionText:
     words = [
         w for w in page.words
         if q.x0 - 1 <= w.x0 < q.x1 and q.y0 <= w.y0 < q.y1
@@ -112,14 +169,22 @@ def question_text(page, q, prof, is_boilerplate) -> QuestionText:
         return QuestionText(q.number, q.subject, flags=["metin_yok"])
 
     baseline_h = statistics.median(w.y1 - w.y0 for w in words)
-    rows: dict = {}
-    for w in words:
-        rows.setdefault(round(w.y0 / max(baseline_h * 0.6, 1.0)), []).append(w)
 
-    lines: list[str] = []
-    for key in sorted(rows):
-        group = rows[key]
-        lines.append(render_line(classify(group, baseline_h)))
+    # Satırları sabit bir ızgaraya yuvarlayarak gruplamak hatalıydı: aynı
+    # satırdaki küçük punto öğeler (eksi işareti, çarpım) taban çizgisinden
+    # 1-2pt kayık durduğu için komşu kutuya düşüp ayrı satır sayılıyordu.
+    # Bunun yerine art arda gelen kelimeler, satır yüksekliğinin yarısı
+    # kadar tolerans içinde aynı satıra toplanır.
+    rows: list[list] = []
+    for w in sorted(words, key=lambda w: w.y0):
+        if rows and w.y0 - rows[-1][0].y0 <= baseline_h * 0.5:
+            rows[-1].append(w)
+        else:
+            rows.append([w])
+
+    lines: list[str] = [
+        render_line(classify(group, baseline_h, radicals)) for group in rows
+    ]
 
     # Şıkları gövdeden ayır
     stem_lines: list[str] = []
@@ -173,16 +238,22 @@ if __name__ == "__main__":
                               is_boilerplate_word, parse_bbox)
 
     bbox = Path(sys.argv[1])
-    subject = sys.argv[2] if len(sys.argv) > 2 else None
+    pdf = Path(sys.argv[2])
+    subject = sys.argv[3] if len(sys.argv) > 3 else None
+
+    import fitz  # PyMuPDF: kök çizgileri yalnızca vektör katmanında var
+
     pages = parse_bbox(bbox)
     by_index = {p.index: p for p in pages}
+    doc = fitz.open(pdf)
+    radicals_by_page = {i + 1: radical_spans(doc[i]) for i in range(doc.page_count)}
+
     out = []
     for q in extract_questions(pages, MEB_LGS_PROFILE):
         if subject and q.subject != subject:
             continue
         page = by_index[q.page]
-        qt = question_text(page, q, MEB_LGS_PROFILE, is_boilerplate_word)
-        if find_missing_radicals(page, q):
-            qt.flags.append("eksik_kok")
+        qt = question_text(page, q, MEB_LGS_PROFILE, is_boilerplate_word,
+                           radicals_by_page.get(q.page, []))
         out.append(qt.as_dict())
     print(json.dumps(out, ensure_ascii=False, indent=2))
