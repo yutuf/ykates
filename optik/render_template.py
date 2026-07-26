@@ -129,6 +129,16 @@ def figure_data_uri(fig: dict, pages_dir: Path, dpi: int = 300,
     if clean:
         from analyze import remove_watermark
         crop = remove_watermark(crop)
+    # Kaynaktaki soru numarasını sil: özel denemede sorular yeniden
+    # sıralandığı için geçerli numara şablonun bastığı numaradır, ikisi
+    # birden görünürse soru çift numaralı okunur.
+    nb = fig.get("numara_kutusu")
+    if nb:
+        from PIL import ImageDraw
+        ImageDraw.Draw(crop).rectangle(
+            [int(nb["x0"] * scale) - box[0] - 2, int(nb["y0"] * scale) - box[1] - 2,
+             int(nb["x1"] * scale) - box[0] + 2, int(nb["y1"] * scale) - box[1] + 2],
+            fill="white")
     buf = BytesIO()
     crop.save(buf, "PNG", optimize=True)
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()

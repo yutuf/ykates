@@ -315,19 +315,29 @@ def content_bounds(page, q, prof, figures) -> dict:
     if not words and not figures:
         return {"x0": q.x0, "y0": q.y0, "x1": q.x1, "y1": q.y1, "sayfa": q.page}
 
-    nums = [w.y0 for w in words if prof.qnum_pattern.match(w.text)]
-    top = min(nums) if nums else min(w.y0 for w in words)
+    num_words = [w for w in words if prof.qnum_pattern.match(w.text)]
+    top = min(w.y0 for w in num_words) if num_words else min(w.y0 for w in words)
+    # Kaynaktaki soru numarası kırpımın içinde kalır ve şablon kendi
+    # numarasını da bastığı için soru çift numaralı görünür. Özel denemede
+    # sorular yeniden sıralandığından doğru numara BİZİM numaramızdır;
+    # kaynaktaki numaranın yeri, kırpma sırasında beyazlatılmak üzere
+    # birlikte taşınır.
+    first = min(num_words, key=lambda w: w.y0) if num_words else None
 
     xs0 = [w.x0 for w in words] + [b.x0 for b in figures]
     xs1 = [w.x1 for w in words] + [b.x1 for b in figures]
     ys1 = [w.y1 for w in words] + [b.y1 for b in figures]
-    return {
+    out = {
         "x0": max(min(xs0) - CROP_PAD, 0.0),
         "y0": max(top - CROP_TOP_PAD, 0.0),
         "x1": min(max(xs1) + CROP_PAD, page.width),
         "y1": min(max(ys1) + CROP_PAD, page.height - prof.footer_band),
         "sayfa": q.page,
     }
+    if first is not None:
+        out["numara_kutusu"] = {"x0": first.x0, "y0": first.y0,
+                                "x1": first.x1, "y1": first.y1}
+    return out
 
 
 def question_text(page, q, prof, is_boilerplate, radicals: list[tuple] = (),
