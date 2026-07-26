@@ -95,11 +95,14 @@ class QuestionText:
     options: dict = field(default_factory=dict)
     flags: list = field(default_factory=list)
     figures: list = field(default_factory=list)
+    mode: str = "metin"          # metin | gorsel
+    full_crop: dict | None = None
 
     def as_dict(self) -> dict:
         return {"soru": self.number, "ders": self.subject,
                 "govde": self.stem, "siklar": self.options,
-                "gorseller": self.figures, "uyarilar": self.flags}
+                "gorseller": self.figures, "uyarilar": self.flags,
+                "mod": self.mode, "tam_kirpim": self.full_crop}
 
 
 def classify(words, baseline_h: float, radicals: list[tuple] = ()):
@@ -250,6 +253,9 @@ def figure_boxes(pdf_page, q, decorations: set) -> list:
 
 LABEL_GAP = 11.0          # pt: şekle bu kadar yakın yazı, şeklin etiketi sayılır
 MAX_LABEL_ROW_WORDS = 5   # bu kadar az kelimeli satır = etiket, değilse paragraf
+# Şekil alanı sorunun bu oranını aşıyorsa soru görsel ağırlıklıdır ve
+# metne ayrıştırılmak yerine tek parça görüntü olarak taşınır.
+FIGURE_HEAVY_RATIO = 0.12
 
 
 def grow_to_labels(boxes: list, words, passes: int = 2) -> list:
@@ -355,6 +361,16 @@ def question_text(page, q, prof, is_boilerplate, radicals: list[tuple] = (),
         {"x0": b.x0, "y0": b.y0, "x1": b.x1, "y1": b.y1, "sayfa": q.page}
         for b in figures
     ]
+    # Görsel ağırlıklı sorularda metni şekilden ayırmaya çalışmak kazanç
+    # getirmiyor: etiketler şeklin parçası, cümleden ayrılınca ikisi de
+    # bozuluyor. Böyle sorular TEK PARÇA olarak, temizlenmiş görüntüyle
+    # taşınır — sayfa düzeni yine bizim şablonumuzda kalır.
+    fig_area = sum((b.x1 - b.x0) * (b.y1 - b.y0) for b in figures)
+    q_area = max((q.x1 - q.x0) * (q.y1 - q.y0), 1.0)
+    if fig_area / q_area >= FIGURE_HEAVY_RATIO:
+        qt.mode = "gorsel"
+        qt.full_crop = {"x0": q.x0, "y0": q.y0, "x1": q.x1, "y1": q.y1,
+                        "sayfa": q.page}
     if len(options) != 4:
         qt.flags.append(f"sik_sayisi={len(options)}")
     return qt

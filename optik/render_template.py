@@ -81,6 +81,8 @@ header .meta .line { display: inline-block; border-bottom: 1px dotted #9aa1ad; w
 }
 .fig { margin: 7px 0 9px; text-align: center; }
 .fig img { max-width: 78%; max-height: 62mm; height: auto; }
+.fig.whole { text-align: left; margin: 2px 0 4px; }
+.fig.whole img { max-width: 100%; max-height: 210mm; }
 
 /* Kök işareti: √ + payın üstüne çizgi. Salt CSS, kütüphane yok. */
 .sqrt { white-space: nowrap; }
@@ -154,6 +156,19 @@ def build_html(questions: list[dict], title: str, subtitle: str,
         # Demo/sunum için isteğe bağlı yetenek etiketi
         tag = q.get("etiket")
         tag_html = f'<div class="tag-cap">{html.escape(tag)}</div>' if tag else ""
+        if q.get("mod") == "gorsel" and q.get("tam_kirpim") and pages_dir:
+            # Görsel ağırlıklı soru: metne ayrıştırmak yerine tek parça
+            # taşınır. Şekil ile etiketleri birbirinden ayırmaya çalışmak
+            # her ikisini de bozuyordu; bütün hâlinde alınca soru
+            # basıldığı gibi doğru kalıyor, sayfa düzeni yine bizde.
+            uri = figure_data_uri(q["tam_kirpim"], pages_dir, pad=2.0)
+            body = (f'<div class="fig whole"><img src="{uri}" alt=""></div>'
+                    if uri else "")
+            blocks.append(
+                f'<div class="q"><div class="num">{i}</div>'
+                f'<div class="body">{tag_html}{body}</div></div>'
+            )
+            continue
         blocks.append(
             f'<div class="q"><div class="num">{i}</div><div class="body">'
             f'{tag_html}'
