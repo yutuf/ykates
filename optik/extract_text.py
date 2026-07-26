@@ -248,6 +248,40 @@ def figure_boxes(pdf_page, q, decorations: set) -> list:
             if m.width >= MIN_FIGURE_SIDE and m.height >= MIN_FIGURE_SIDE]
 
 
+LABEL_GAP = 11.0          # pt: şekle bu kadar yakın yazı, şeklin etiketi sayılır
+MAX_LABEL_ROW_WORDS = 5   # bu kadar az kelimeli satır = etiket, değilse paragraf
+
+
+def grow_to_labels(boxes: list, words, passes: int = 2) -> list:
+    """Şekil kutusunu, kendi etiketlerini içine alacak biçimde büyütür.
+
+    Kutu yalnızca ÇİZİMLERDEN kurulduğu için ("3x cm", "Beyaz", eksen
+    adları) yazılar dışarıda kalıyordu; sonuç olarak etiket hem
+    kırpılan görselden düşüyor hem de gövde cümlesinin ortasında
+    kalıyordu. Bir kelime kutuya yeterince yakınsa ve yatayda kutunun
+    hizasındaysa şekle dahil edilir — paragraf satırları sütun marjından
+    başladığı için bu koşula takılmaz."""
+    import fitz
+
+    # Şekil etiketleri seyrek satırlardır ("Yukarı", "Sol", "3x cm");
+    # paragraf satırları ise satır boyunca çok sayıda kelime taşır. Kutuyu
+    # yalnızca seyrek satırlarla büyütmek, şeklin çevresindeki yön
+    # etiketlerini içeri alırken gövde metnini dışarıda bırakır.
+    row_size: dict = {}
+    for w in words:
+        row_size[round(w.y0 / 6)] = row_size.get(round(w.y0 / 6), 0) + 1
+    sparse = [w for w in words if row_size.get(round(w.y0 / 6), 0) <= MAX_LABEL_ROW_WORDS]
+
+    grown = [fitz.Rect(b) for b in boxes]
+    for _ in range(passes):
+        for i, b in enumerate(grown):
+            near = fitz.Rect(b) + (-LABEL_GAP, -LABEL_GAP, LABEL_GAP, LABEL_GAP)
+            for w in sparse:
+                if near.intersects(fitz.Rect(w.x0, w.y0, w.x1, w.y1)):
+                    grown[i] = fitz.Rect(grown[i]) | fitz.Rect(w.x0, w.y0, w.x1, w.y1)
+    return grown
+
+
 def in_any_box(w, boxes) -> bool:
     return any(b.x0 - 2 <= w.x0 and w.x1 <= b.x1 + 2
                and b.y0 - 2 <= w.y0 and w.y1 <= b.y1 + 2 for b in boxes)
@@ -359,6 +393,9 @@ if __name__ == "__main__":
             continue
         page = by_index[q.page]
         figures = figure_boxes(doc[q.page - 1], q, decorations)
+        in_q = [w for w in page.words
+                if q.x0 - 1 <= w.x0 < q.x1 and q.y0 <= w.y0 < q.y1]
+        figures = grow_to_labels(figures, in_q)
         qt = question_text(page, q, MEB_LGS_PROFILE, is_boilerplate_word,
                            radicals_by_page.get(q.page, []), figures)
         out.append(qt.as_dict())
