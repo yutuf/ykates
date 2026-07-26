@@ -30,26 +30,40 @@ SQRT_RE = re.compile(r"\\sqrt\{([^{}]*)\}")
 SUP_RE = re.compile(r"\^\{([^{}]*)\}")
 SUB_RE = re.compile(r"_\{([^{}]*)\}")
 
+BRAND = "Netçe"
+BRAND_TAGLINE = "Kazanım düzeyinde ölçme ve kişiye özel deneme"
+BRAND_COLOR = "#1F6FEB"
+
 CSS = """
-@page { size: A4; margin: 18mm 15mm; }
+@page { size: A4; margin: 16mm 14mm 14mm; }
 * { box-sizing: border-box; }
 body {
   font: 10.5pt/1.55 "DejaVu Serif", Georgia, serif;
   color: #16181d; margin: 0;
 }
 header {
-  display: flex; justify-content: space-between; align-items: flex-end;
-  border-bottom: 2.5px solid #16181d; padding-bottom: 8px; margin-bottom: 20px;
+  display: flex; justify-content: space-between; align-items: flex-start;
+  border-bottom: 2.5px solid ACCENT; padding-bottom: 9px; margin-bottom: 18px;
 }
-header .title { font-size: 15pt; font-weight: 700; letter-spacing: -.2px; }
-header .sub { font-size: 8.5pt; color: #5b6270; margin-top: 3px; }
-header .meta { font-size: 8.5pt; color: #5b6270; text-align: right; line-height: 1.9; }
-header .meta .line { display: inline-block; border-bottom: 1px dotted #9aa1ad; width: 120px; }
+.brand { display: flex; gap: 9px; align-items: center; }
+.mark {
+  width: 27px; height: 27px; border-radius: 7px; background: ACCENT; color: #fff;
+  font: 700 14pt/27px "DejaVu Sans", sans-serif; text-align: center;
+}
+.brand .name { font: 700 14pt/1.1 "DejaVu Sans", sans-serif; letter-spacing: -.3px; }
+.brand .tag { font: 7.5pt/1.3 "DejaVu Sans", sans-serif; color: #6b7280; margin-top: 2px; }
+header .doc { text-align: right; }
+header .doc .kind {
+  display: inline-block; background: ACCENT; color: #fff; border-radius: 3px;
+  font: 700 7.5pt/1 "DejaVu Sans", sans-serif; padding: 4px 7px; letter-spacing: .4px;
+}
+header .meta { font: 8pt/1.95 "DejaVu Sans", sans-serif; color: #5b6270; margin-top: 6px; }
+header .meta .line { display: inline-block; border-bottom: 1px dotted #9aa1ad; width: 108px; }
 
 .q { break-inside: avoid; margin-bottom: 17px; display: flex; gap: 10px; }
 .q .num {
   flex: 0 0 22px; height: 22px; border-radius: 50%;
-  background: #16181d; color: #fff;
+  background: ACCENT; color: #fff;
   font: 700 9.5pt/22px "DejaVu Sans", sans-serif; text-align: center;
 }
 .q .body { flex: 1; }
@@ -137,16 +151,24 @@ def build_html(questions: list[dict], title: str, subtitle: str,
             f'{figs_html}'
             f'<div class="opts{wide}">{opt_html}</div></div></div>'
         )
+    css = CSS.replace("ACCENT", BRAND_COLOR)
     return f"""<!doctype html><html lang="tr"><head><meta charset="utf-8">
-<title>{html.escape(title)}</title><style>{CSS}</style></head><body>
+<title>{html.escape(title)}</title><style>{css}</style></head><body>
 <header>
-  <div><div class="title">{html.escape(title)}</div>
-       <div class="sub">{html.escape(subtitle)}</div></div>
-  <div class="meta">Ad Soyad: <span class="line"></span><br>
-                    Tarih: <span class="line"></span></div>
+  <div class="brand">
+    <div class="mark">{html.escape(BRAND[0])}</div>
+    <div><div class="name">{html.escape(BRAND)}</div>
+         <div class="tag">{html.escape(BRAND_TAGLINE)}</div></div>
+  </div>
+  <div class="doc">
+    <span class="kind">{html.escape(title.upper())}</span>
+    <div class="meta">Ad Soyad <span class="line"></span><br>
+                      Sınıf / Tarih <span class="line"></span></div>
+  </div>
 </header>
 {''.join(blocks)}
-<footer><span>{len(questions)} soru</span><span>ykates</span></footer>
+<footer><span>{html.escape(subtitle)} · {len(questions)} soru</span>
+        <span>{html.escape(BRAND)}</span></footer>
 </body></html>"""
 
 
