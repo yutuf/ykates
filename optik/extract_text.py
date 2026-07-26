@@ -387,6 +387,9 @@ if __name__ == "__main__":
 
     import fitz  # PyMuPDF: kök çizgileri yalnızca vektör katmanında var
 
+    from figures import find_figures
+
+    pages_dir = bbox.parent / "_pages"
     pages = parse_bbox(bbox)
     by_index = {p.index: p for p in pages}
     doc = fitz.open(pdf)
@@ -398,10 +401,23 @@ if __name__ == "__main__":
         if subject and q.subject != subject:
             continue
         page = by_index[q.page]
-        figures = figure_boxes(doc[q.page - 1], q, decorations)
         in_q = [w for w in page.words
                 if q.x0 - 1 <= w.x0 < q.x1 and q.y0 <= w.y0 < q.y1]
-        figures = grow_to_labels(figures, in_q)
+        page_png = pages_dir / f"page-{q.page:02d}.png"
+        if page_png.exists():
+            # İki aşama: önce metin OLMAYAN mürekkepten şeklin nerede
+            # olduğu bulunur (renkten bağımsız, çok parçalı diyagramları
+            # ve kırmızı içeriği doğru yakalar), sonra kutu kendi
+            # etiketlerini içine alacak biçimde büyütülür — aksi hâlde
+            # etiketler hem görselden kesilir hem cümlenin ortasında kalır.
+            # NOT: kutuyu grow_to_labels ile büyütmek denendi ve geri
+            # alındı — etiketleri toplarken şık satırlarını da yutup
+            # temiz soru sayısını 17'den 14'e düşürdü.
+            figures = [fitz.Rect(b.x0, b.y0, b.x1, b.y1)
+                       for b in find_figures(page_png, q, in_q)]
+        else:
+            figures = grow_to_labels(
+                figure_boxes(doc[q.page - 1], q, decorations), in_q)
         qt = question_text(page, q, MEB_LGS_PROFILE, is_boilerplate_word,
                            radicals_by_page.get(q.page, []), figures)
         out.append(qt.as_dict())
