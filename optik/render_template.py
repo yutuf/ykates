@@ -83,7 +83,8 @@ def to_html(text: str) -> str:
     return out
 
 
-def figure_data_uri(fig: dict, pages_dir: Path, dpi: int = 300, pad: float = 4.0) -> str | None:
+def figure_data_uri(fig: dict, pages_dir: Path, dpi: int = 300,
+                    pad: float = 12.0, clean: bool = True) -> str | None:
     """Şekli, kırpılmış sayfa görüntüsünden kesip base64 olarak gömer.
     Gömmek, HTML'in tek dosya olarak taşınabilmesini sağlar."""
     import base64
@@ -103,6 +104,9 @@ def figure_data_uri(fig: dict, pages_dir: Path, dpi: int = 300, pad: float = 4.0
                min(int((fig["x1"] + pad) * scale), im.width),
                min(int((fig["y1"] + pad) * scale), im.height))
         crop = im.crop(box).convert("RGB")
+    if clean:
+        from analyze import remove_watermark
+        crop = remove_watermark(crop)
     buf = BytesIO()
     crop.save(buf, "PNG", optimize=True)
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()

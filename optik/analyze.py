@@ -127,20 +127,39 @@ def crop_path(crops_dir: Path, subject: str, number: int) -> Path | None:
     return p if p.exists() else None
 
 
+WATERMARK_MIN_LIGHT = 180  # filigran açık tonludur; koyu metin bu eşiğin altında
+WATERMARK_MIN_RED_BIAS = 8  # kırmızıya kayış; nötr griler ve mavi/yeşil grafikler elenmez
+
+
 def remove_watermark(im: Image.Image) -> Image.Image:
-    """Arka plandaki soluk pembe/kırmızı filigranı (MEB mührü) beyaza
-    çeker. Filigran gerçek siyah metinle aynı katmanda basılı olduğu için
-    renkten ayrılır: açık tonlu VE belirgin kırmızı/pembe ağırlıklı
-    pikseller silinir. Siyah metin (koyu), mavi/yeşil grafik öğeleri
-    (kırmızı baskın değil) ve beyaz zemin etkilenmez."""
-    px = im.load()
-    w, h = im.size
-    for y in range(h):
-        for x in range(w):
-            r, g, b = px[x, y][:3]
-            if min(r, g, b) >= 180 and r >= g and r >= b and (r - min(g, b)) >= 8:
-                px[x, y] = (255, 255, 255)
-    return im
+    """Arka plandaki soluk kırmızı filigranı (MEB mührü) beyaza çeker.
+    Filigran gerçek siyah metinle aynı katmanda basılı olduğu için
+    renkten ayrılır: açık tonlu VE kırmızıya kaymış pikseller silinir.
+    Siyah metin (koyu), mavi/yeşil grafik öğeleri (kırmızı baskın değil)
+    ve beyaz zemin etkilenmez.
+
+    Piksel piksel döngü yerine kanal işlemleri kullanılır; şekil
+    kırpmalarının her birinde çalıştığı için hız önemli."""
+    from PIL import ImageChops
+
+    r, g, b = im.convert("RGB").split()
+    min_gb = ImageChops.darker(g, b)
+    min_all = ImageChops.darker(r, min_gb)
+
+    light = min_all.point(lambda v: 255 if v >= WATERMARK_MIN_LIGHT else 0)
+    # subtract 0'da kırpar: g-r == 0 ise r >= g demektir
+    r_ge_g = ImageChops.subtract(g, r).point(lambda v: 255 if v == 0 else 0)
+    r_ge_b = ImageChops.subtract(b, r).point(lambda v: 255 if v == 0 else 0)
+    red_bias = ImageChops.subtract(r, min_gb).point(
+        lambda v: 255 if v >= WATERMARK_MIN_RED_BIAS else 0)
+
+    mask = light
+    for part in (r_ge_g, r_ge_b, red_bias):
+        mask = ImageChops.multiply(mask, part)
+
+    out = im.convert("RGB")
+    out.paste(Image.new("RGB", out.size, "white"), mask=mask.convert("L"))
+    return out
 
 
 def compose_test(images: list[Path], out_pdf: Path, title: str,

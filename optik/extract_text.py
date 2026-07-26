@@ -46,16 +46,33 @@ class Piece:
 # sınırlar o çizgiyi kutu/tablo kenarlarından ayırır.
 RADICAL_MAX_HEIGHT = 14.0
 RADICAL_MIN_WIDTH = 6.0
+RADICAL_TICK_MAX_WIDTH = 6.0   # kökün sol ucundaki küçük çentik
+RADICAL_TICK_MAX_HEIGHT = 7.0  # çentik kısadır; tablo dikey ayracı satır boyu uzar
+RADICAL_TICK_GAP = 2.5         # çentik ile üst çizgi bitişik sayılır
 
 
 def radical_spans(page) -> list[tuple]:
-    """Sayfadaki kök çizgilerini (vinculum) döndürür: (x0, x1, y_alt)."""
+    """Sayfadaki kök çizgilerini (vinculum) döndürür: (x0, x1, y_alt).
+
+    Ayırt edici imza GENİŞLİK DEĞİL, kökün sol ucundaki küçük çentiktir:
+    √ işareti iki parça çizilir — önce kısa diyagonal çentik, hemen
+    ardından sayının üstünü örten yatay çizgi. Tablo ve kutu kenarları da
+    ince yatay çizgidir (bu kitapçıkta hücre kenarları 37pt, yani kök
+    çizgisiyle aynı boyda) ama solunda çentik yoktur."""
+    strokes = [d["rect"] for d in page.get_drawings() if d["type"] == "s"]
+    ticks = [r for r in strokes
+             if r.width <= RADICAL_TICK_MAX_WIDTH
+             and r.height <= RADICAL_TICK_MAX_HEIGHT]
     spans = []
-    for d in page.get_drawings():
-        if d["type"] != "s":
+    for r in strokes:
+        if not (r.height <= RADICAL_MAX_HEIGHT and r.width >= RADICAL_MIN_WIDTH):
             continue
-        r = d["rect"]
-        if r.height <= RADICAL_MAX_HEIGHT and r.width >= RADICAL_MIN_WIDTH:
+        has_tick = any(
+            abs(t.x1 - r.x0) <= RADICAL_TICK_GAP and t.y1 >= r.y1 - RADICAL_MAX_HEIGHT
+            and t.y0 <= r.y1 + 2
+            for t in ticks
+        )
+        if has_tick:
             spans.append((r.x0, r.x1, r.y1))
     return spans
 
@@ -178,6 +195,19 @@ def decoration_rects(doc) -> set:
     return {k for k, pages in seen.items() if len(pages) >= threshold}
 
 
+def is_decorative_color(drawing) -> bool:
+    """Filigran/mühür çizimleri doygun kırmızıyla çizilip saydamlıkla
+    soluklaştırılıyor; sayfada dolaştıkları için konum tekrarına da
+    takılmıyorlar. Bu yüzden renkten de elenirler — aksi hâlde cümlenin
+    ortasındaki bir mühür yıldızı "şekil" sanılıp içine düşen kelimeleri
+    gövdeden siliyor."""
+    col = drawing.get("fill") or drawing.get("color")
+    if not col or len(col) < 3:
+        return False
+    r, g, b = col[0], col[1], col[2]
+    return r > 0.55 and r - max(g, b) > 0.35
+
+
 def figure_boxes(pdf_page, q, decorations: set) -> list:
     """Sorunun içindeki görsel bölgeleri döndürür (çizim kümeleri +
     gömülü resimler). Şeklin İÇİNDEKİ etiketler ("3x cm", "Yukarı") böylece
@@ -188,7 +218,7 @@ def figure_boxes(pdf_page, q, decorations: set) -> list:
     for d in pdf_page.get_drawings():
         r = d["rect"]
         key = (round(r.x0), round(r.y0), round(r.x1), round(r.y1))
-        if key in decorations:
+        if key in decorations or is_decorative_color(d):
             continue
         # kök çizgisi / alt çizgi gibi ince çizgiler şekil değildir
         if r.height < 15 and r.width < 60:
