@@ -32,17 +32,13 @@ genişlik/yarım genişlik ayrımı, sıkı kırpma) yayınevinden bağımsızd�
 
 Hazır profiller:
 
-- `MEB_LGS_PROFILE` — resmi MEB LGS kitapçıkları (Sayısal + Sözel, 90/90
-  soru doğru tespit edildi). Ağır filigran mührü var, ders adı her sayfada
-  tekrar eder.
-- `SIVAS_KOPRU_PROFILE` — Sivas Köprü Yayınları matematik denemeleri.
-  Filigran yok, ders adı sadece ilk sayfada yazıyor (sonraki sayfalarda
-  genel "SAYISAL BÖLÜM"/"İZLEME SINAVI" şeridi tekrarlıyor —
-  `content_markers` ile ders bilgisi sayfalar arası taşınıyor). 3 farklı
-  yıl şablonunda test edildi (2019-20, 2020-21, 2021-22 — üçü de farklı
-  görsel tasarım, aynı profil hepsinde 20/20 doğru çalıştı). Bazı sayfalar
-  tam genişlik + yarım genişlik soruları karışık kullanıyor, motor bunu
-  soru bazında (sayfa bazında değil) otomatik ayırt ediyor.
+- `MEB_LGS_PROFILE` — resmi MEB LGS kitapçıkları. Ağır filigran mührü var,
+  ders adı her sayfada tekrar eder, numaralandırma sütun-önceliklidir.
+- `SIVAS_KOPRU_PROFILE` — Sivas Köprü Yayınları. Hem tek ders (Matematik)
+  hem tam LGS kitapçığı şablonları. Ders adı bazen yalnızca ilk sayfada
+  yazıyor (`content_markers` ile taşınıyor), numaralandırma satır-önceliklidir.
+- `YARIS_PROFILE` — Yarış Ortaokulu denemeleri. Tanımlı, ama bu örnekte
+  metin eğriye çevrilmiş olduğu için motor dosyayı reddediyor (aşağıya bkz.).
 
 Yeni bir yayınevi eklemek için:
 
@@ -50,25 +46,49 @@ Yeni bir yayınevi eklemek için:
 2. `Profile(...)` ile yeni bir profil tanımla — ders başlıkları, filigran
    varsa kelimeleri, cevap anahtarı sayfası imzası, gerekirse
    `content_markers` (ders adı her sayfada tekrar etmiyorsa).
-3. Sütun sayısı/genişliği ELLE ayarlanmaz — `detect_columns()` dokümandan
-   otomatik öğrenir (1, 2, 3+ sütun, hatta aynı sayfada karışık düzen bile
-   fark etmez).
+3. Şunları ELLE ayarlamak gerekmez, motor dokümandan otomatik öğrenir:
+   sütun sayısı/konumu, sayfa içi numaralandırma yönü (sütun- ya da
+   satır-öncelikli), üstbilgi/altbilgi şeritleri, tam genişlik ve yarım
+   genişlik soruların aynı sayfada karışık kullanımı.
+
+## Doğrulama durumu
+
+| Kitapçık | Sonuç |
+|---|---|
+| MEB 2024 Sayısal | 40/40 |
+| MEB 2024 Sözel | 50/50 |
+| Sivas Köprü Mat. 2019-20 / 2020-21 / 2021-22 | 20/20 (her biri) |
+| Sivas Köprü tam LGS Deneme 7 (45 sayfa, 6 ders) | 88/90 |
+| Yarış Deneme 4 | reddedildi (metin katmanı yetersiz) |
+| Fikri Bilim, KerimHoca | işlenemiyor (aşağıya bkz.) |
+
+Sivas Köprü Deneme 7'deki 2 eksik soru İngilizce bölümünde: o sayfalarda
+gömülü fontun karakter eşlemesi bozuk olduğu için soru numaraları metin
+katmanından hiç okunamıyor. Motor bunları sessizce atlamaz, `rapor.json`'a
+ve `stderr`'e hangi soruların çıkarılamadığını yazar.
 
 ## Bilinen sınırlar
 
-- Sadece native metin PDF (taranmış kitapçıklar için ayrı bir OCR/vision
-  motoru gerekir — NIM üzerinden bir layout/OCR modeli değerlendirilecek).
-- **Bozuk font kodlaması:** Bazı PDF'ler (özellikle ilovepdf.com gibi
-  üçüncü parti sıkıştırma/birleştirme araçlarından geçmiş olanlar) metin
-  katmanının ToUnicode eşlemesini bozuyor — harfler okunaksız çıkıyor
-  (rakamlar genelde etkilenmiyor). Bu durumda ders/filigran kelime
-  eşleştirmesi çalışmaz; tespit edildi (Fikri Bilim örneği), henüz
-  çözülmedi.
-- **Rozet tarzı soru numaraları:** Bazı yayınevleri (ör. KerimHoca) soru
-  numarasını "1." gibi düz metin yerine renkli rozet/kutu grafiği içinde
-  gösteriyor; bu durumda pdftotext numarayı parçalanmış/tutarsız glif
-  dizileri olarak çıkarabiliyor. Henüz çözülmedi, araştırma sürüyor.
-- Sıkı kırpma (soru içeriğinin gerçek bittiği yerde durma) filigran
-  kelime listesine dayanıyor; filigranı olmayan/farklı filigranlı
-  yayınevlerinde bu liste boş bırakılabilir (güvenli tarafta kalır,
-  sadece biraz fazla boşluk bırakır — içerik asla kesilmez).
+Aşağıdaki üç durumda metin tabanlı yöntem yapısal olarak çalışmaz; ortak
+çözüm OCR/vision tabanlı ikinci bir motordur (NIM üzerinden bir layout/OCR
+modeli değerlendirilecek):
+
+- **Taranmış PDF** — metin katmanı hiç yok.
+- **Eğriye çevrilmiş (outline) metin** — yayınevi fontları vektör çizime
+  dönüştürmüş; `pdftotext` yalnızca birkaç kırıntı görür. Yarış örneği
+  böyle: 50 soru numarasının 33'ü okunamıyor.
+- **Bozuk font kodlaması** — gömülü fontun ToUnicode eşlemesi kırık,
+  harfler okunaksız çıkıyor (ör. ilovepdf.com'dan geçmiş Fikri Bilim
+  dosyası; Sivas Deneme 7'nin İngilizce bölümü kısmen).
+- **Rozet tarzı soru numaraları** — KerimHoca numarayı düz metin yerine
+  renkli rozet grafiği içinde basıyor, numara parçalanmış glif dizileri
+  olarak çıkıyor.
+
+Motor bu dosyalarda **kısmi/yanlış kırpma üretmek yerine hata verip
+durur** (`UNRELIABLE_MISSING_RATIO` eşiği): sessizce bozuk veri üretmek,
+açıkça reddetmekten daha kötüdür.
+
+Ayrıca sıkı kırpma (soru içeriğinin gerçek bittiği yerde durma) filigran
+kelime listesine dayanır; filigranı olmayan yayınevlerinde bu liste boş
+bırakılabilir — güvenli tarafta kalır, sadece biraz fazla boşluk bırakır,
+içerik asla kesilmez.
