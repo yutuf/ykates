@@ -29,6 +29,7 @@ CHROME_CANDIDATES = [
 SQRT_RE = re.compile(r"\\sqrt\{([^{}]*)\}")
 SUP_RE = re.compile(r"\^\{([^{}]*)\}")
 SUB_RE = re.compile(r"_\{([^{}]*)\}")
+FRAC_RE = re.compile(r"\\frac\{([^{}]*)\}\{([^{}]*)\}")
 
 BRAND = "Netçe"
 BRAND_TAGLINE = "Kazanım düzeyinde ölçme ve kişiye özel deneme"
@@ -90,6 +91,12 @@ header .meta .line { display: inline-block; border-bottom: 1px dotted #9aa1ad; w
 .sqrt > span { border-top: 1.1px solid currentColor; padding: 0 1px 0 1px; }
 sup, sub { font-size: .72em; line-height: 0; }
 
+/* Kesir: pay/payda, salt CSS */
+.frac { display: inline-block; vertical-align: -0.55em; text-align: center;
+        font-size: .92em; margin: 0 1px; }
+.frac .p { display: block; border-bottom: 1.1px solid currentColor; padding: 0 3px; }
+.frac .q { display: block; padding: 0 3px; }
+
 footer { margin-top: 22px; border-top: 1px solid #ccd1d9; padding-top: 6px;
          font-size: 8pt; color: #79808d; display: flex; justify-content: space-between; }
 
@@ -125,6 +132,9 @@ def to_html(text: str) -> str:
     """LaTeX benzeri işaretlemeyi HTML'e çevirir (önce kaçış, sonra
     biçimlendirme; böylece soru metnindeki < > karakterleri bozulmaz)."""
     out = html.escape(text)
+    out = FRAC_RE.sub(
+        lambda m: f'<span class="frac"><span class="p">{m.group(1)}</span>'
+                  f'<span class="q">{m.group(2)}</span></span>', out)
     out = SQRT_RE.sub(lambda m: f'<span class="sqrt"><span>{m.group(1)}</span></span>', out)
     out = SUP_RE.sub(lambda m: f"<sup>{m.group(1)}</sup>", out)
     out = SUB_RE.sub(lambda m: f"<sub>{m.group(1)}</sub>", out)
