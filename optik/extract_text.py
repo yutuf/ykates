@@ -290,13 +290,100 @@ def in_any_box(w, boxes) -> bool:
                and b.y0 - 2 <= w.y0 and w.y1 <= b.y1 + 2 for b in boxes)
 
 
+# Bölüm sonu duyurusu ("MATEMATİK TESTİ BİTTİ.", "... TESTİNE GEÇİNİZ.")
+# soruya ait değildir. Satırı kırpmak yetmez: sözel kitapçıkta duyuru,
+# sol sütundaki bir şıkla AYNI satırda, sağ sütunda duruyor. Bu yüzden
+# duyurunun kendi kelimeleri bulunur — çapa sözcükten sola doğru, aradaki
+# boşluk sütun boşluğuna açılana kadar.
+SECTION_END_ANCHORS = ("BİTTİ", "GEÇİNİZ")
+SECTION_END_MAX_GAP = 15.0
+SECTION_END_NEXT_ROW = 22.0   # pt: duyurunun ikinci satırı bu kadar altta
+SECTION_END_ALIGN = 8.0       # pt: iki satır aynı sol kenardan başlar
+
+
+def _run_left_from(row: list, i: int) -> list:
+    """row[i]'den sola doğru, boşluk sütun boşluğuna açılana kadar."""
+    run = [row[i]]
+    j = i - 1
+    while j >= 0 and row[j + 1].x0 - row[j].x1 <= SECTION_END_MAX_GAP:
+        run.append(row[j])
+        j -= 1
+    return run
+
+
+def section_end_words(page, tr_upper_fn) -> list:
+    """Bölüm sonu duyurusuna ait kelimeler.
+
+    Duyuru iki satırdır ve yalnızca ilkinde çapa sözcük bulunur
+    ("TEST BİTTİ." / "CEVAPLARINIZI KONTROL EDİNİZ."). İkinci satır
+    çapasız olduğu için hizadan tanınır: hemen altta durur ve aynı sol
+    kenardan başlar. Sayfanın kalanı bu koşulu sağlamaz, çünkü paragraf
+    ve şık satırları sütun marjından başlar."""
+    rows: dict = {}
+    for w in page.words:
+        rows.setdefault(round(w.y0 / 6), []).append(w)
+    ordered = [sorted(g, key=lambda w: w.x0) for _, g in sorted(rows.items())]
+
+    found: list = []
+    anchored: list = []          # (y0, x0) — bulunan duyuru satırları
+    for row in ordered:
+        for i, w in enumerate(row):
+            if any(a in tr_upper_fn(w.text) for a in SECTION_END_ANCHORS):
+                run = _run_left_from(row, i)
+                found.extend(run)
+                anchored.append((min(r.y0 for r in run),
+                                 min(r.x0 for r in run)))
+
+    for row in ordered:
+        run = _run_left_from(row, len(row) - 1)
+        y0 = min(r.y0 for r in run)
+        x0 = min(r.x0 for r in run)
+        if any(0 < y0 - ay <= SECTION_END_NEXT_ROW and abs(x0 - ax) <= SECTION_END_ALIGN
+               for ay, ax in anchored):
+            found.extend(run)
+    return found
+
+
+# Sayfa kenarındaki DİK basılmış kurum şeridi ("ÖLÇME, DEĞERLENDİRME VE
+# SINAV HİZMETLERİ GENEL MÜDÜRLÜĞÜ (ÖDSGM)") soruya ait değil ama sütunun
+# hemen sağında durduğu için kırpımın içine giriyordu. Konumdan elemek
+# yetmiyor: şerit sayfadan sayfaya kayıyor, bu yüzden "her sayfada aynı
+# yerde tekrar eden mobilya" testine takılmıyor. Ayırt edici imza
+# GEOMETRİK: döndürülmüş bir sözcüğün kutusu boyu kadar uzun, bir harf
+# kadar dardır.
+ROTATED_MIN_RATIO = 2.5   # yükseklik / genişlik
+ROTATED_MIN_CHARS = 3     # "it", "if" gibi dar iki harfli sözcükler elenmesin
+
+
+def is_rotated(w) -> bool:
+    return (len(w.text) >= ROTATED_MIN_CHARS
+            and (w.y1 - w.y0) > (w.x1 - w.x0) * ROTATED_MIN_RATIO)
+
+
+# Mührün kırıntıları metin katmanına minicik kutular olarak düşüyor
+# (3.7pt boyunda tek bir "A"). İki zararı var: kırpma sınırı onlardan
+# hesaplanınca soru, yanındaki dik kurum şeridini de içine alıyor; gövde
+# metnine karışınca da cümlenin ortasında alt simge gibi görünüyorlar
+# ("kendini_A_ daha iyi"). Punto ile elenirler — bu kitapçıklarda kırıntı
+# oranı 0.3, en küçük gerçek metin (üst simge) 0.7 civarında.
+SPECK_MAX_RATIO = 0.45
+
+
+def drop_specks(words: list) -> list:
+    if not words:
+        return words
+    mid_h = statistics.median(w.y1 - w.y0 for w in words)
+    kept = [w for w in words if (w.y1 - w.y0) >= mid_h * SPECK_MAX_RATIO]
+    return kept or words
+
+
 CROP_PAD = 4.0      # pt: yanlarda ve altta bırakılan ince pay
 # Üstte pay neredeyse yok: sayfa üstbilgisinin ayraç çizgisi soru
 # numarasının hemen üstünde duruyor ve birkaç punto pay onu içeri alıyor.
 CROP_TOP_PAD = 1.0
 
 
-def content_bounds(page, q, prof, figures) -> dict:
+def content_bounds(page, q, prof, figures, hide=()) -> dict:
     """Tek parça kırpımın sınırlarını sorunun GERÇEK içeriğinden kurar.
 
     Sorunun kutusu sayfa genişliğindedir ve numaranın üstünde pay bırakır;
@@ -305,12 +392,17 @@ def content_bounds(page, q, prof, figures) -> dict:
     kutuya giriyordu. Bunlar soruya ait değil. Sınırlar bu yüzden
     kelimelerin ve şekillerin kapladığı alandan hesaplanır; üstten de soru
     numarasının hizasından başlanır."""
+    hidden = {id(w) for w in hide}
     words = [w for w in page.words
              if q.x0 - 1 <= w.x0 < q.x1 and q.y0 <= w.y0 < q.y1
              and w.text not in prof.watermark_words
-             and w.y0 <= page.height - prof.footer_band]
+             and w.y0 <= page.height - prof.footer_band
+             and not is_rotated(w)
+             and id(w) not in hidden]
     if not words and not figures:
         return {"x0": q.x0, "y0": q.y0, "x1": q.x1, "y1": q.y1, "sayfa": q.page}
+
+    words = drop_specks(words)
 
     num_words = [w for w in words if prof.qnum_pattern.match(w.text)]
     top = min(w.y0 for w in num_words) if num_words else min(w.y0 for w in words)
@@ -325,7 +417,10 @@ def content_bounds(page, q, prof, figures) -> dict:
     # her görselin solunda ~24pt boş şerit kalıyor ve soru, metin modundaki
     # sorulara göre sağa kaymış görünüyor. Sol sınır bu yüzden numara
     # dışındaki içerikten hesaplanır.
-    body = [w for w in words if not prof.qnum_pattern.match(w.text)] or words
+    # Sol sınırdan YALNIZCA kaynağın soru numarası dışlanır. Numara
+    # kalıbına uyan her sözcüğü atmak, şeklin içindeki "1. İşçi", "2. İşçi"
+    # gibi etiketleri de atıyor ve kırpım onların ilk hanesini kesiyordu.
+    body = [w for w in words if w is not first] or words
     xs0 = [w.x0 for w in body] + [b.x0 for b in figures]
     xs1 = [w.x1 for w in words] + [b.x1 for b in figures]
     ys1 = [w.y1 for w in words] + [b.y1 for b in figures]
@@ -339,11 +434,19 @@ def content_bounds(page, q, prof, figures) -> dict:
     if first is not None:
         out["numara_kutusu"] = {"x0": first.x0, "y0": first.y0,
                                 "x1": first.x1, "y1": first.y1}
+    # Kırpma dikdörtgeninin İÇİNDE kalan duyuru kelimeleri (şıkla aynı
+    # satırda olabiliyor) görüntüde beyazlatılır.
+    inside = [w for w in hide
+              if out["x0"] <= w.x1 and w.x0 <= out["x1"]
+              and out["y0"] <= w.y1 and w.y0 <= out["y1"]]
+    if inside:
+        out["gizle"] = [{"x0": w.x0, "y0": w.y0, "x1": w.x1, "y1": w.y1}
+                        for w in inside]
     return out
 
 
 def question_text(page, q, prof, is_boilerplate, radicals: list[tuple] = (),
-                  figures: list = ()) -> QuestionText:
+                  figures: list = (), hide=()) -> QuestionText:
     # Kırpma tarafındaki eleyici tek harfleri de atar (mühürdeki "A", "B"
     # rozetleri). Metin çıkarırken bu YANLIŞ olur: şıklardaki roma rakamı
     # "I" da tek harftir ve atılınca "B) I ve II" -> "B) ve II" olur, yani
@@ -354,12 +457,16 @@ def question_text(page, q, prof, is_boilerplate, radicals: list[tuple] = (),
         if q.x0 - 1 <= w.x0 < q.x1 and q.y0 <= w.y0 < q.y1
         and w.text not in prof.watermark_words
         and w.y0 <= page.height - prof.footer_band
+        and not is_rotated(w)
     ]
     # soru numarasının kendisi gövdeye girmesin
     words = [w for w in words if not prof.qnum_pattern.match(w.text)]
     # şeklin içindeki etiketler gövde cümlesine karışmasın; onlar
     # kırpılacak görselin parçası
     words = [w for w in words if not in_any_box(w, figures)]
+    hidden = {id(w) for w in hide}
+    words = [w for w in words if id(w) not in hidden]
+    words = drop_specks(words)
     if not words:
         return QuestionText(q.number, q.subject, flags=["metin_yok"])
 
@@ -422,7 +529,7 @@ def question_text(page, q, prof, is_boilerplate, radicals: list[tuple] = (),
     # sorularda gerçek.
     if figures:
         qt.mode = "gorsel"
-        qt.full_crop = content_bounds(page, q, prof, figures)
+        qt.full_crop = content_bounds(page, q, prof, figures, hide)
     if len(options) != 4:
         qt.flags.append(f"sik_sayisi={len(options)}")
     return qt
@@ -483,6 +590,8 @@ if __name__ == "__main__":
     doc = fitz.open(pdf)
     radicals_by_page = {i + 1: radical_spans(doc[i]) for i in range(doc.page_count)}
     decorations = decoration_rects(doc)
+    enders_by_page = {p.index: section_end_words(p, crop_booklet.tr_upper)
+                      for p in pages}
 
     out = []
     for q in extract_questions(pages, profile):
@@ -507,6 +616,14 @@ if __name__ == "__main__":
             figures = grow_to_labels(
                 figure_boxes(doc[q.page - 1], q, decorations), in_q)
         qt = question_text(page, q, profile, is_boilerplate_word,
-                           radicals_by_page.get(q.page, []), figures)
-        out.append(qt.as_dict())
+                           radicals_by_page.get(q.page, []), figures,
+                           enders_by_page.get(q.page, []))
+        # Sayfa görüntülerinin nerede olduğu soruyla birlikte taşınır:
+        # bir öğrencinin yanlışları sayısal ve sözel kitapçığa birden
+        # yayılır ve `sayfa` numaraları iki kitapçıkta çakışır. Tek bir
+        # --pages klasörü varsayılırsa sözel sorunun görseli sayısal
+        # kitapçığın aynı numaralı sayfasından kırpılır.
+        row = qt.as_dict()
+        row["sayfa_klasoru"] = str(pages_dir.resolve())
+        out.append(row)
     print(json.dumps(out, ensure_ascii=False, indent=2))

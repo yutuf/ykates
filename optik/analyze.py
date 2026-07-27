@@ -122,9 +122,17 @@ def net(counts: dict) -> float:
     return float(counts["dogru"])
 
 
-def crop_path(crops_dir: Path, subject: str, number: int) -> Path | None:
-    p = crops_dir / f"{subject}_soru{number:02d}.png"
-    return p if p.exists() else None
+def crop_path(crops_dirs, subject: str, number: int) -> Path | None:
+    """Birden çok kırpma klasöründe arar: bir denemenin sayısal ve sözel
+    kitapçığı ayrı ayrı kırpıldığı için öğrencinin yanlışları iki klasöre
+    birden yayılır."""
+    if isinstance(crops_dirs, Path):
+        crops_dirs = [crops_dirs]
+    for d in crops_dirs:
+        p = d / f"{subject}_soru{number:02d}.png"
+        if p.exists():
+            return p
+    return None
 
 
 WATERMARK_MIN_LIGHT = 180  # filigran açık tonludur; koyu metin bu eşiğin altında
@@ -213,15 +221,16 @@ def build_branded_test(picked: list[dict], out_pdf: Path, title: str,
     dizilebilir metin olarak, görsel ağırlıklı sorular tek parça olarak.
     Kırpılmış görselleri alt alta yığmaktan farkı, sayfa düzeninin bizde
     olması."""
-    from render_template import build_html, render_pdf
+    from render_template import build_packed_html, render_pdf
 
-    html_text = build_html(picked, title, "Yanlış yapılan sorulardan derlenmiştir",
-                           pages_dir)
+    html_text = build_packed_html(picked, title,
+                                  "Yanlış yapılan sorulardan derlenmiştir",
+                                  pages_dir)
     render_pdf(html_text, out_pdf)
     return len(picked)
 
 
-def analyse(crops_dir: Path, key_csv: Path, answers_csv: Path, out_dir: Path,
+def analyse(crops_dir, key_csv: Path, answers_csv: Path, out_dir: Path,
             questions: list[dict] | None = None, pages_dir: Path | None = None,
             include_blank: bool = False):
     key = read_key(key_csv)
@@ -318,32 +327,38 @@ def analyse(crops_dir: Path, key_csv: Path, answers_csv: Path, out_dir: Path,
 if __name__ == "__main__":
     args = sys.argv[1:]
 
-    def take(flag):
-        if flag in args:
+    def take_all(flag) -> list[str]:
+        """Bayrak birden çok kez verilebilir; virgülle de ayrılabilir.
+        Bir denemenin dersleri ayrı JSON'lara çıkarıldığı için gerekli."""
+        values: list[str] = []
+        while flag in args:
             i = args.index(flag)
-            value = args[i + 1]
+            values.extend(v for v in args[i + 1].split(",") if v)
             del args[i:i + 2]
-            return value
-        return None
+        return values
 
     include_blank = "--bos" in args
     if include_blank:
         args.remove("--bos")
-    questions_path = take("--sorular")
-    pages_path = take("--pages")
+    questions_paths = take_all("--sorular")
+    pages_paths = take_all("--pages")
 
     if len(args) < 4:
         print(__doc__)
         raise SystemExit(2)
 
-    questions = (json.loads(Path(questions_path).read_text(encoding="utf-8"))
-                 if questions_path else None)
-    pages_dir = Path(pages_path) if pages_path else None
+    questions: list[dict] | None = None
+    if questions_paths:
+        questions = []
+        for p in questions_paths:
+            questions.extend(json.loads(Path(p).read_text(encoding="utf-8")))
+    pages_dir = Path(pages_paths[0]) if pages_paths else None
     if questions is not None and pages_dir is None:
         # şablon, görsel ağırlıklı soruları sayfa görüntüsünden kırpar
-        pages_dir = Path(args[0]).parent / "_pages"
+        pages_dir = Path(args[0].split(",")[0]).parent / "_pages"
 
-    n_students, n_rows = analyse(Path(args[0]), Path(args[1]), Path(args[2]),
+    crops_dirs = [Path(p) for p in args[0].split(",") if p]
+    n_students, n_rows = analyse(crops_dirs, Path(args[1]), Path(args[2]),
                                  Path(args[3]), questions, pages_dir,
                                  include_blank)
     print(f"{n_students} öğrenci çözümlendi, {n_rows} ders satırı -> {args[3]}/")

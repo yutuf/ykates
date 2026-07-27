@@ -132,13 +132,19 @@ def figure_data_uri(fig: dict, pages_dir: Path, dpi: int = 300,
     # Kaynaktaki soru numarasını sil: özel denemede sorular yeniden
     # sıralandığı için geçerli numara şablonun bastığı numaradır, ikisi
     # birden görünürse soru çift numaralı okunur.
-    nb = fig.get("numara_kutusu")
-    if nb:
+    # Kaynak numarası ve bölüm sonu duyurusu ("MATEMATİK TESTİ BİTTİ.")
+    # kırpma dikdörtgeninin içinde kalabiliyor; ikisi de soruya ait
+    # olmadığı için beyazlatılır.
+    blanks = [fig["numara_kutusu"]] if fig.get("numara_kutusu") else []
+    blanks += fig.get("gizle", [])
+    if blanks:
         from PIL import ImageDraw
-        ImageDraw.Draw(crop).rectangle(
-            [int(nb["x0"] * scale) - box[0] - 2, int(nb["y0"] * scale) - box[1] - 2,
-             int(nb["x1"] * scale) - box[0] + 2, int(nb["y1"] * scale) - box[1] + 2],
-            fill="white")
+        draw = ImageDraw.Draw(crop)
+        for b in blanks:
+            draw.rectangle(
+                [int(b["x0"] * scale) - box[0] - 2, int(b["y0"] * scale) - box[1] - 2,
+                 int(b["x1"] * scale) - box[0] + 2, int(b["y1"] * scale) - box[1] + 2],
+                fill="white")
     buf = BytesIO()
     crop.save(buf, "PNG", optimize=True)
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
@@ -150,8 +156,13 @@ def build_html(questions: list[dict], title: str, subtitle: str,
     for i, q in enumerate(questions, start=1):
         opts = q.get("siklar") or {}
         figs_html = ""
-        if pages_dir:
-            uris = [figure_data_uri(f, pages_dir) for f in q.get("gorseller", [])]
+        # Soru kendi kitapçığının sayfa klasörünü taşıyorsa o kullanılır:
+        # sayısal ve sözel kitapçıkların sayfa numaraları çakışıyor,
+        # ortak bir klasör varsayılırsa yanlış sayfadan kırpılır.
+        own = q.get("sayfa_klasoru")
+        pages = Path(own) if own else pages_dir
+        if pages:
+            uris = [figure_data_uri(f, pages) for f in q.get("gorseller", [])]
             figs_html = "".join(
                 f'<div class="fig"><img src="{u}" alt=""></div>'
                 for u in uris if u
@@ -166,7 +177,7 @@ def build_html(questions: list[dict], title: str, subtitle: str,
         # Demo/sunum için isteğe bağlı yetenek etiketi
         tag = q.get("etiket")
         tag_html = f'<div class="tag-cap">{html.escape(tag)}</div>' if tag else ""
-        if q.get("mod") == "gorsel" and q.get("tam_kirpim") and pages_dir:
+        if q.get("mod") == "gorsel" and q.get("tam_kirpim") and pages:
             # Görsel ağırlıklı soru: metne ayrıştırmak yerine tek parça
             # taşınır. Şekil ile etiketleri birbirinden ayırmaya çalışmak
             # her ikisini de bozuyordu; bütün hâlinde alınca soru
@@ -174,7 +185,7 @@ def build_html(questions: list[dict], title: str, subtitle: str,
             # pad=0: tam soru kırpımının sınırları içerikten zaten hassas
             # hesaplandı. Buraya pay eklemek üstbilgi ayraç çizgisini geri
             # çağırıyor (çizgi, soru numarasının ~2pt üstünde duruyor).
-            uri = figure_data_uri(q["tam_kirpim"], pages_dir, pad=0.0)
+            uri = figure_data_uri(q["tam_kirpim"], pages, pad=0.0)
             # Gerçek boyutunda bas (pt -> mm), yüzdeyle esnetme. Yüzde
             # kullanılınca her kırpım kabın tamamına yayılıyor; genişliği
             # farklı sorular farklı punto ve farklı sol kenarla çıkıyordu.
@@ -214,6 +225,184 @@ def build_html(questions: list[dict], title: str, subtitle: str,
 <footer><span>{html.escape(subtitle)} · {len(questions)} soru</span>
         <span>{html.escape(BRAND)}</span></footer>
 </body></html>"""
+
+
+PAGE_H_PX = 297 / 25.4 * 96          # A4 yüksekliği (CSS px)
+MARGIN_PX = (16 + 14) / 25.4 * 96    # @page üst + alt kenar boşluğu
+PRINT_W_PX = (210 - 14 - 14) / 25.4 * 96   # @page içindeki yazı genişliği
+
+# Ölçüm sayfası, BASKI genişliğine sabitlenir. Tarayıcı penceresi daha
+# geniş olduğu için metin orada daha az sarıyor ve sorular olduğundan
+# alçak ölçülüyordu; sayfalar bu yüzden taşıp fazladan sayfa açıyordu.
+MEASURE_JS = """
+<style>body { width: %.2fpx; }</style>
+<script>
+window.addEventListener('load', function () {
+  var out = {header: 0, footer: 0, q: []};
+  // Kenar boşlukları da yer kaplar; yalnızca kutu yüksekliğini almak
+  // ilk sayfayı 18px, son sayfayı 22px eksik hesaplatıyordu.
+  function outer(el, prop) {
+    if (!el) return 0;
+    return el.getBoundingClientRect().height +
+           parseFloat(window.getComputedStyle(el)[prop] || 0);
+  }
+  out.header = outer(document.querySelector('header'), 'marginBottom');
+  out.footer = outer(document.querySelector('footer'), 'marginTop');
+  document.querySelectorAll('.q').forEach(function (el) {
+    var s = window.getComputedStyle(el);
+    out.q.push(el.getBoundingClientRect().height + parseFloat(s.marginBottom || 0));
+  });
+  var d = document.createElement('div');
+  d.id = 'olcum';
+  d.textContent = JSON.stringify(out);
+  document.body.appendChild(d);
+});
+</script>
+""" % PRINT_W_PX
+
+MEASURE_RE = re.compile(r'<div id="olcum">(.*?)</div>', re.S)
+
+
+def measure_heights(html_text: str) -> dict | None:
+    """Soruların GERÇEK yüksekliklerini tarayıcıdan ölçer.
+
+    Metin sorularının yüksekliği önceden kestirilemez (sarma, punto,
+    şıkların bir mi iki sütuna sığdığı). Kestirimle sayfalamak, ya soruyu
+    taşırır ya da boşluk bırakır; bu yüzden bir kez ölçüm turu atılır.
+    Sonuç, sayfanın DOM'una yazılıp --dump-dom ile geri okunur."""
+    chrome = next((c for c in CHROME_CANDIDATES if Path(c).exists()), None)
+    if chrome is None:
+        return None
+    probe = html_text.replace("</body>", MEASURE_JS + "</body>")
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "olcum.html"
+        src.write_text(probe, encoding="utf-8")
+        proc = subprocess.run(
+            [chrome, "--headless", "--disable-gpu", "--no-sandbox",
+             f"--user-data-dir={tmp}/profile", "--virtual-time-budget=8000",
+             "--dump-dom", src.as_uri()],
+            capture_output=True, text=True, timeout=240,
+        )
+    match = MEASURE_RE.search(proc.stdout)
+    if not match:
+        return None
+    try:
+        return json.loads(html.unescape(match.group(1)))
+    except json.JSONDecodeError:
+        return None
+
+
+def _layout(order: list[int], heights: list[float],
+            page_h: float, first_page_h: float) -> list[list[int]]:
+    """Verilen sıranın hangi soruyu hangi sayfaya düşürdüğü."""
+    pages: list[list[int]] = [[]]
+    space = first_page_h
+    for idx in order:
+        if heights[idx] > space and pages[-1]:
+            pages.append([])
+            space = page_h
+        pages[-1].append(idx)
+        space -= heights[idx]
+    return pages
+
+
+def _page_count(order: list[int], heights: list[float], page_h: float,
+                first_page_h: float, tail_h: float) -> int:
+    """Sıranın kaç sayfa tuttuğu — alt bilgi son sayfaya sığmıyorsa +1."""
+    pages = _layout(order, heights, page_h, first_page_h)
+    cap = first_page_h if len(pages) == 1 else page_h
+    slack = cap - sum(heights[i] for i in pages[-1])
+    return len(pages) + (1 if slack < tail_h else 0)
+
+
+def pack_order(heights: list[float], page_h: float, first_page_h: float,
+               tail_h: float = 0.0) -> list[int]:
+    """Soruları, sayfada boşluk kalmayacak biçimde sıralar.
+
+    Sıradaki soru kalan boşluğa sığmıyorsa sayfayı yarım bırakıp geçmek
+    yerine, sığan ilk sonraki soru öne alınır. Soru asla bölünmez; sadece
+    sıra değişir ve özel denemede soru sırasının bir anlamı yoktur.
+
+    `tail_h` alt bilgi şerididir: akışın en sonunda durduğu için yalnızca
+    SON sayfada yer kaplar. Yer kalmazsa tarayıcı onu yeni bir sayfaya
+    atıyor ve deneme boşuna bir sayfa uzuyordu; bu yüzden son sayfada
+    yer açılana kadar oradan soru geri çekilir."""
+    remaining = list(range(len(heights)))
+    order: list[int] = []
+    space = first_page_h
+    while remaining:
+        placed = None
+        for idx in remaining:
+            if heights[idx] <= space:
+                placed = idx
+                break
+        if placed is None:              # hiçbiri sığmıyor -> yeni sayfa
+            if space == page_h:         # boş sayfaya da sığmıyorsa tek başına koy
+                placed = remaining[0]
+                order.append(placed)
+                remaining.remove(placed)
+                space = page_h
+                continue
+            space = page_h
+            continue
+        order.append(placed)
+        remaining.remove(placed)
+        space -= heights[placed]
+
+    if tail_h <= 0:
+        return order
+
+    # Son sayfada alt bilgiye yer aç: oradaki bir soruyu, önceki
+    # sayfalardan birinin artığına taşı. Taşınacak soru bulunamazsa sıra
+    # olduğu gibi kalır (o zaman alt bilgi zaten yeni sayfaya düşer).
+    for _ in range(len(order)):
+        pages = _layout(order, heights, page_h, first_page_h)
+        if len(pages) == 1:
+            used = sum(heights[i] for i in pages[0])
+            if used + tail_h <= first_page_h:
+                break
+        slack = [page_h - sum(heights[i] for i in p) for p in pages]
+        slack[0] = first_page_h - sum(heights[i] for i in pages[0])
+        if slack[-1] >= tail_h:
+            break
+        moved = False
+        for idx in sorted(pages[-1], key=lambda i: heights[i]):
+            target = next((p for p in range(len(pages) - 1)
+                           if slack[p] >= heights[idx]), None)
+            if target is None:
+                continue
+            order.remove(idx)
+            order.insert(order.index(pages[target][-1]) + 1, idx)
+            moved = True
+            break
+        if not moved:
+            break
+
+    # Açgözlü sıralama nadiren özgün sıradan kötü çıkabiliyor (son sayfaya
+    # yer açmak için yapılan taşıma bir sayfa daha açtırabilir). Kazanç
+    # yoksa özgün sıra korunur — soru sırası boşuna karışmasın.
+    if _page_count(order, heights, page_h, first_page_h, tail_h) >= \
+            _page_count(list(range(len(heights))), heights, page_h,
+                        first_page_h, tail_h):
+        return list(range(len(heights)))
+    return order
+
+
+def build_packed_html(questions, title, subtitle, pages_dir):
+    """Önce ölç, sonra boşluk kalmayacak sırayla diz. Ölçüm başarısız
+    olursa özgün sıra korunur (tarayıcı yine soruyu bölmez, sadece
+    sayfalar seyrek kalır)."""
+    first = build_html(questions, title, subtitle, pages_dir)
+    if len(questions) < 2:
+        return first
+    m = measure_heights(first)
+    if not m or len(m.get("q", [])) != len(questions):
+        return first
+    usable = PAGE_H_PX - MARGIN_PX
+    order = pack_order(m["q"], usable, usable - m["header"], m["footer"])
+    if order == list(range(len(questions))):
+        return first
+    return build_html([questions[i] for i in order], title, subtitle, pages_dir)
 
 
 def render_pdf(html_text: str, out_pdf: Path) -> None:

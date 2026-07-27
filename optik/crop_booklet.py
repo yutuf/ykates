@@ -595,12 +595,50 @@ def extract_questions(pages: list[Page], profile: Profile,
         ]
         return min(below) - 2 if below else page_height - 20
 
+    def col_content_bottom(page_index, col, y0):
+        """Bir sütun sorusunun içeriğinin gerçekten nerede bittiği.
+
+        Yalnızca sütunun İÇİNDE kalan satırlar sayılır: tam genişlik bir
+        soru her iki sütunun x aralığına birden yayıldığı için satırları
+        elenir, aksi hâlde üstündeki sütun sorusunun sayfa sonuna kadar
+        indiği sanılırdı."""
+        page = pages_by_index[page_index]
+        cols = page_cols[page_index]
+        cx0 = cols[col] - 6
+        cx1 = cols[col + 1] - 4 if col + 1 < len(cols) else page.width
+        end = band_end(page_index, col, y0, page.height)
+        rows: dict = {}
+        for w in page.words:
+            if is_boilerplate_word(w, page.height, profile):
+                continue
+            if y0 <= w.y0 < end:
+                rows.setdefault(round(w.y0 / 6), []).append(w)
+        bottom = y0
+        for row in rows.values():
+            if all(cx0 - 2 <= r.x0 and r.x1 <= cx1 + 2 for r in row):
+                bottom = max(bottom, max(r.y1 for r in row))
+        return bottom
+
+    # Yan sütundaki soru BİZDEN YUKARIDA başlayıp bandımıza sarkabiliyor
+    # (ör. sağ sütun sayfanın tepesinden, sol sütundaki soru ortadan
+    # başlıyor). Yalnızca "başlangıç bandın içinde mi" diye bakmak bunu
+    # kaçırıyor ve soru tam genişlik sanılıp yan sütundakinin şıklarını
+    # kesiyordu; bu yüzden iki bandın ÖRTÜŞMESİNE bakılır.
+    BAND_OVERLAP_MIN = 30.0
+
+    spans = {}
+    for (page_index, n_col, n_y0, _wd) in placed:
+        spans.setdefault((page_index, n_col, n_y0),
+                         col_content_bottom(page_index, n_col, n_y0))
+
     is_full = []
     for (page_index, tcol, y0, _wd) in placed:
         page = pages_by_index[page_index]
         pre_end = band_end(page_index, tcol, y0, page.height)
         shares_band = any(
-            n_page == page_index and n_col != tcol and y0 - 20 <= n_y0 < pre_end
+            n_page == page_index and n_col != tcol
+            and min(pre_end, spans[(n_page, n_col, n_y0)]) - max(y0, n_y0)
+            > BAND_OVERLAP_MIN
             for n_page, n_col, n_y0, _ in placed
         )
         is_full.append(not shares_band)
@@ -1002,10 +1040,33 @@ def crop_questions(pdf_path: Path, out_dir: Path, profile: Profile = MEB_LGS_PRO
     return manifest
 
 
+PROFILES = {
+    "meb": MEB_LGS_PROFILE,
+    "sivas": SIVAS_KOPRU_PROFILE,
+    "yaris": YARIS_PROFILE,
+}
+
 if __name__ == "__main__":
-    pdf = Path(sys.argv[1])
-    out = Path(sys.argv[2])
-    manifest = crop_questions(pdf, out, MEB_LGS_PROFILE)
+    # Yayınevi profili dışarıdan seçilebilir. Motor profil bazlı olduğu
+    # hâlde komut satırı MEB'e sabitlenmişti; extract_text.py'de zaten
+    # olan --profil bayrağı burada da bulunmalı, aksi hâlde Sivas/Yarış
+    # kitapçıkları yanlış profille kırpılıyor.
+    args = sys.argv[1:]
+    profile = MEB_LGS_PROFILE
+    if "--profil" in args:
+        i = args.index("--profil")
+        name = args[i + 1]
+        if name not in PROFILES:
+            raise SystemExit(f"Bilinmeyen profil: {name} "
+                             f"(seçenekler: {', '.join(PROFILES)})")
+        profile = PROFILES[name]
+        del args[i:i + 2]
+    if len(args) < 2:
+        raise SystemExit("kullanım: crop_booklet.py kitapcik.pdf cikti/ "
+                         "[--profil meb|sivas|yaris]")
+    pdf = Path(args[0])
+    out = Path(args[1])
+    manifest = crop_questions(pdf, out, profile)
     (out / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
