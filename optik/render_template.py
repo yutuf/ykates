@@ -92,6 +92,32 @@ sup, sub { font-size: .72em; line-height: 0; }
 
 footer { margin-top: 22px; border-top: 1px solid #ccd1d9; padding-top: 6px;
          font-size: 8pt; color: #79808d; display: flex; justify-content: space-between; }
+
+/* Öğrenci karnesi — denemenin neden bu sorulardan kurulduğunu gösterir */
+.rapor { break-inside: avoid; border: 1px solid #dfe3ea; border-radius: 5px;
+         padding: 11px 13px; margin-bottom: 18px; background: #fafbfd; }
+.rapor h2 { font: 700 9.5pt/1.2 "DejaVu Sans", sans-serif; margin: 0 0 8px;
+            color: ACCENT; letter-spacing: .2px; text-transform: uppercase; }
+.rapor table { width: 100%; border-collapse: collapse;
+               font: 8.5pt/1.4 "DejaVu Sans", sans-serif; }
+.rapor th { text-align: left; color: #6b7280; font-weight: 700;
+            border-bottom: 1px solid #e3e7ee; padding: 3px 6px 5px; }
+.rapor td { padding: 3px 6px; border-bottom: 1px solid #eef1f5; }
+.rapor td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.rapor .zayif { margin-top: 9px; font: 8.5pt/1.5 "DejaVu Sans", sans-serif; }
+.rapor .zayif b { color: #16181d; }
+.rapor .chip { display: inline-block; background: #eef4ff; color: ACCENT;
+               border: 1px solid #cddffb; border-radius: 3px;
+               padding: 2px 6px; margin: 2px 4px 2px 0; font-size: 8pt; }
+
+/* Cevap anahtarı — öğrenciye giden kopyada YOK, ayrı dosyada basılır */
+.key { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px 10px;
+       font: 9pt/1.5 "DejaVu Sans", sans-serif; }
+.key .cell { border: 1px solid #e3e7ee; border-radius: 4px; padding: 5px 7px; }
+.key .cell .n { color: #6b7280; font-size: 8pt; }
+.key .cell .a { font-weight: 700; color: ACCENT; font-size: 11pt; }
+.key .cell .k { display: block; color: #79808d; font-size: 6.8pt;
+                line-height: 1.25; margin-top: 2px; }
 """
 
 
@@ -150,9 +176,56 @@ def figure_data_uri(fig: dict, pages_dir: Path, dpi: int = 300,
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
+SUBJECT_LABELS = {
+    "matematik": "Matematik", "fen_bilimleri": "Fen Bilimleri",
+    "turkce": "Türkçe", "inkilap": "T.C. İnkılap Tarihi",
+    "din_kulturu": "Din Kültürü", "ingilizce": "Yabancı Dil",
+}
+
+
+def report_block(rapor: dict | None) -> str:
+    """Denemenin başındaki karne: hangi derste kaç net, hangi kazanımlar
+    zayıf. Bunsuz özel deneme "rastgele sorular" gibi duruyor; asıl
+    satılan şey soruların DERLENME GEREKÇESİ."""
+    if not rapor:
+        return ""
+    rows = "".join(
+        f"<tr><td>{html.escape(SUBJECT_LABELS.get(s, s))}</td>"
+        f'<td class="num">{c["dogru"]}</td><td class="num">{c["yanlis"]}</td>'
+        f'<td class="num">{c["bos"]}</td><td class="num"><b>{c["net"]:g}</b></td></tr>'
+        for s, c in sorted(rapor.get("dersler", {}).items())
+    )
+    weak = rapor.get("zayif_kazanimlar") or []
+    chips = "".join(f'<span class="chip">{html.escape(k)} · {n}</span>'
+                    for k, n in weak)
+    weak_html = (f'<div class="zayif"><b>Tekrar gerektiren kazanımlar:</b><br>'
+                 f"{chips}</div>") if chips else ""
+    return (
+        '<div class="rapor"><h2>Deneme sonucu</h2>'
+        "<table><tr><th>Ders</th><th>Doğru</th><th>Yanlış</th>"
+        "<th>Boş</th><th>Net</th></tr>" + rows + "</table>"
+        + weak_html + "</div>"
+    )
+
+
+def answer_key_html(questions: list[dict]) -> str:
+    """Öğretmen için cevap anahtarı. Numaralar denemenin SON sırasına göre
+    verilir — sayfa doldurma sıralamayı değiştirdiği için anahtar, soru
+    listesiyle birlikte üretilmek zorunda."""
+    cells = []
+    for i, q in enumerate(questions, start=1):
+        kazanim = q.get("kazanim") or ""
+        cells.append(
+            f'<div class="cell"><span class="n">{i}.</span> '
+            f'<span class="a">{html.escape(q.get("dogru", "—"))}</span>'
+            f'<span class="k">{html.escape(kazanim)}</span></div>'
+        )
+    return f'<div class="key">{"".join(cells)}</div>'
+
+
 def build_html(questions: list[dict], title: str, subtitle: str,
-               pages_dir: Path | None = None) -> str:
-    blocks = []
+               pages_dir: Path | None = None, rapor: dict | None = None) -> str:
+    blocks = [report_block(rapor)]
     for i, q in enumerate(questions, start=1):
         opts = q.get("siklar") or {}
         figs_html = ""
@@ -248,6 +321,7 @@ window.addEventListener('load', function () {
   }
   out.header = outer(document.querySelector('header'), 'marginBottom');
   out.footer = outer(document.querySelector('footer'), 'marginTop');
+  out.rapor = outer(document.querySelector('.rapor'), 'marginBottom');
   document.querySelectorAll('.q').forEach(function (el) {
     var s = window.getComputedStyle(el);
     out.q.push(el.getBoundingClientRect().height + parseFloat(s.marginBottom || 0));
@@ -388,21 +462,50 @@ def pack_order(heights: list[float], page_h: float, first_page_h: float,
     return order
 
 
-def build_packed_html(questions, title, subtitle, pages_dir):
+def build_packed_html(questions, title, subtitle, pages_dir, rapor=None):
     """Önce ölç, sonra boşluk kalmayacak sırayla diz. Ölçüm başarısız
     olursa özgün sıra korunur (tarayıcı yine soruyu bölmez, sadece
-    sayfalar seyrek kalır)."""
-    first = build_html(questions, title, subtitle, pages_dir)
+    sayfalar seyrek kalır).
+
+    (html, sıralanmış_sorular) döndürür — cevap anahtarı bu sıraya göre
+    basılmak zorunda, sayfa doldurma soruların sırasını değiştiriyor."""
+    first = build_html(questions, title, subtitle, pages_dir, rapor)
     if len(questions) < 2:
-        return first
+        return first, list(questions)
     m = measure_heights(first)
     if not m or len(m.get("q", [])) != len(questions):
-        return first
+        return first, list(questions)
     usable = PAGE_H_PX - MARGIN_PX
-    order = pack_order(m["q"], usable, usable - m["header"], m["footer"])
+    # Karne de ilk sayfada yer kaplar; hesaba katılmazsa ilk sayfa taşıp
+    # deneme boşuna bir sayfa uzuyor.
+    first_page = usable - m["header"] - m.get("rapor", 0.0)
+    order = pack_order(m["q"], usable, first_page, m["footer"])
     if order == list(range(len(questions))):
-        return first
-    return build_html([questions[i] for i in order], title, subtitle, pages_dir)
+        return first, list(questions)
+    ordered = [questions[i] for i in order]
+    return build_html(ordered, title, subtitle, pages_dir, rapor), ordered
+
+
+def build_key_html(questions: list[dict], title: str, subtitle: str) -> str:
+    """Cevap anahtarı — AYRI dosya. Öğrencinin eline geçen denemenin
+    içine konamaz, ama öğretmen üretilen denemeyi okuyamazsa deneme
+    kullanılamaz; şimdiye kadar eksik olan parça buydu."""
+    css = CSS.replace("ACCENT", BRAND_COLOR)
+    return f"""<!doctype html><html lang="tr"><head><meta charset="utf-8">
+<title>{html.escape(title)}</title><style>{css}</style></head><body>
+<header>
+  <div class="brand">
+    <div class="mark">{html.escape(BRAND[0])}</div>
+    <div><div class="name">{html.escape(BRAND)}</div>
+         <div class="tag">{html.escape(BRAND_TAGLINE)}</div></div>
+  </div>
+  <div class="doc"><span class="kind">CEVAP ANAHTARI</span>
+    <div class="meta">{html.escape(subtitle)}</div></div>
+</header>
+{answer_key_html(questions)}
+<footer><span>Öğretmen kopyası · {len(questions)} soru</span>
+        <span>{html.escape(BRAND)}</span></footer>
+</body></html>"""
 
 
 def render_pdf(html_text: str, out_pdf: Path) -> None:

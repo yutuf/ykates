@@ -34,7 +34,7 @@ import csv
 import json
 import shutil
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -216,17 +216,26 @@ def compose_test(images: list[Path], out_pdf: Path, title: str,
 
 
 def build_branded_test(picked: list[dict], out_pdf: Path, title: str,
-                       pages_dir: Path) -> int:
+                       pages_dir: Path, rapor: dict | None = None) -> int:
     """Özel denemeyi markalı şablonla üretir: metne çevrilebilen sorular
     dizilebilir metin olarak, görsel ağırlıklı sorular tek parça olarak.
     Kırpılmış görselleri alt alta yığmaktan farkı, sayfa düzeninin bizde
-    olması."""
-    from render_template import build_packed_html, render_pdf
+    olması.
 
-    html_text = build_packed_html(picked, title,
-                                  "Yanlış yapılan sorulardan derlenmiştir",
-                                  pages_dir)
+    Yanına öğretmen için cevap anahtarı da basılır. Anahtar, denemenin
+    SON sırasına göre üretilmek zorunda: sayfa doldurma soruların sırasını
+    değiştiriyor."""
+    from render_template import (build_key_html, build_packed_html,
+                                 render_pdf)
+
+    subtitle = "Yanlış yapılan sorulardan derlenmiştir"
+    html_text, ordered = build_packed_html(picked, title, subtitle,
+                                           pages_dir, rapor)
     render_pdf(html_text, out_pdf)
+
+    if any(q.get("dogru") for q in ordered):
+        render_pdf(build_key_html(ordered, title, title),
+                   out_pdf.with_name(out_pdf.stem + "_cevap.pdf"))
     return len(picked)
 
 
@@ -275,9 +284,20 @@ def analyse(crops_dir, key_csv: Path, answers_csv: Path, out_dir: Path,
         title = f"{st.name or st.no} — Özel Deneme"
         if questions is not None and pages_dir is not None:
             lookup = {(q["ders"], q["soru"]): q for q in questions}
-            picked = [lookup[(r.subject, r.number)] for r in wrong
-                      if (r.subject, r.number) in lookup]
-            page_count = build_branded_test(picked, out_pdf, title, pages_dir)
+            # Soruya doğru şık ve kazanım iliştirilir; ikisi de cevap
+            # anahtarını basmak için gerekli. KOPYA üzerinde çalışılır —
+            # lookup tüm öğrenciler arasında paylaşılıyor.
+            picked = [dict(lookup[(r.subject, r.number)],
+                           dogru=r.correct, kazanim=r.topic)
+                      for r in wrong if (r.subject, r.number) in lookup]
+            weak = Counter(r.topic for r in wrong if r.topic)
+            card = {
+                "dersler": {s: dict(c, net=net(c))
+                            for s, c in sorted(by_subject.items())},
+                "zayif_kazanimlar": weak.most_common(6),
+            }
+            page_count = build_branded_test(picked, out_pdf, title,
+                                            pages_dir, card)
         else:
             page_count = compose_test(images, out_pdf, title)
 
