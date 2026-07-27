@@ -559,11 +559,7 @@ if __name__ == "__main__":
     # Yayınevi profili dışarıdan seçilir; kırpma tarafı zaten profil
     # bazlıydı, metin çıkarma MEB'e sabitlenmiş kalmıştı ve bu yüzden
     # Sivas/Yarış kitapçıklarında çalıştırılamıyordu.
-    PROFILES = {
-        "meb": crop_booklet.MEB_LGS_PROFILE,
-        "sivas": crop_booklet.SIVAS_KOPRU_PROFILE,
-        "yaris": crop_booklet.YARIS_PROFILE,
-    }
+    PROFILES = crop_booklet.PROFILES
 
     args = sys.argv[1:]
     profile_name = "meb"

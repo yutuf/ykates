@@ -27,6 +27,7 @@ başlangıcı kabul edilir.
 """
 import json
 import re
+from collections import Counter
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -115,6 +116,12 @@ class Profile:
     # içerik sayılır — ders devam ettirilmez (MEB gibi her sayfada ders adı
     # tekrar eden yayınevleri için doğru davranış).
     content_markers: frozenset = frozenset()
+    # Ders adını sayfanın ALT şeridine yazan yayınevleri ("4 | 8. SINIF
+    # TÜRKÇE"). Açıldığında ders adı üst bantta bulunamazsa alt bantta da
+    # aranır ve eşleşme sözcük kümesiyle yapılır — bu kitapçıklar taranmış
+    # olduğu için OCR sözcük sırasını karıştırıyor ve araya ayraç
+    # ("FEN | BİLİMLERİ") sokabiliyor, düz metin araması tutmuyor.
+    subject_in_footer: bool = False
 
 
 # LGS'nin ders adları yayınevinden yayınevine sadece süsleme farkıyla
@@ -180,6 +187,23 @@ YARIS_PROFILE = Profile(
     footer_band=60.0,
 )
 
+# Fikri Bilim Yayınları — taranmış/yeniden üretilmiş kitapçık. Gövde fontu
+# Unicode'a eşlenmediği için (pdffonts: "uni no") metin katmanı kullanılamaz,
+# OCR'a düşülür. İki ayırt edici yanı var: ders adı sayfanın ÜST bandında
+# değil ALT şeridinde duruyor ("4 | 8. SINIF TÜRKÇE"), ve bazı sayfalarda
+# hiç geçmiyor — üstte yalnızca "8. Sınıf Kazanım Değerlendirme - 4" şeridi
+# var, o yüzden ders oradan devam ettiriliyor.
+FIKRI_BILIM_PROFILE = Profile(
+    name="fikri_bilim",
+    qnum_pattern=re.compile(r"^(\d{1,2})\.$"),
+    subject_keywords=LGS_SUBJECT_KEYWORDS,
+    content_markers=frozenset({"KAZANIM", "FİKRİBİLİMYAYİNLARİ"}),
+    answer_key_markers=("CEVAP", "ANAHTARI"),
+    subject_in_footer=True,
+    margin_slack=13.0,
+    footer_band=60.0,
+)
+
 SINGLE_LETTER_RE = re.compile(r"^[A-ZÇĞİÖŞÜ]$")
 
 
@@ -218,7 +242,88 @@ def starts_a_question(page: Page, w: Word) -> bool:
     return not (len(letters) >= 2 and all(c.isupper() for c in letters))
 
 
-def header_cutoff(page: Page, profile: Profile, furniture: set) -> float:
+# ───────────────────── Rozetli soru numaraları (otomatik) ────────────────
+#
+# Bazı yayınevleri soru numarasını noktayla değil, RENKLİ BİR KUTUNUN
+# içinde yazıyor ("1." değil, turuncu kareye oturmuş "1"). Nokta zorunlu
+# olduğu için bu kitapçıklardan tek soru bile çıkmıyordu. Noktayı isteğe
+# bağlı yapmak çare değil: o zaman metindeki her sayı ("20 cm", "A) 10")
+# aday oluyor ve dizi doğrulaması çöküyor.
+#
+# Rozet bunun yerine ÇİZİM katmanından tanınır: küçük, dolu, hep AYNI
+# renkte bir dikdörtgen ve içinde tek bir sayı. Doğru rengi seçmek için
+# de veri kullanılır — gerçek numara rozetleri 1'den başlayan boşluksuz
+# bir dizi kurar (her derste yeniden 1'e döndüğü için sayılar basamak
+# basamak azalan bir merdiven oluşturur), sayfa numarası şeridi ya da
+# süsleme kutuları kurmaz.
+BADGE_MIN_SIDE = 9.0
+BADGE_MAX_SIDE = 34.0
+BADGE_MIN_COUNT = 8
+BADGE_NUM_RE = re.compile(r"^(\d{1,2})$")
+
+
+def _badge_sequence_ok(numbers: list[int]) -> bool:
+    counts = Counter(numbers)
+    if 1 not in counts:
+        return False
+    top = max(counts)
+    if any(k not in counts for k in range(1, top + 1)):
+        return False          # dizide boşluk var -> numara rozeti değil
+    return all(counts[k] <= counts[k - 1] for k in range(2, top + 1))
+
+
+def find_number_badges(pdf_path: Path) -> set:
+    """Renkli kutuya oturtulmuş soru numaralarının konumları.
+    {(sayfa, yuvarlanmış x0, yuvarlanmış y0)} — bulunamazsa boş küme."""
+    try:
+        import fitz
+    except ImportError:
+        return set()
+
+    by_colour: dict = {}
+    with fitz.open(pdf_path) as doc:
+        for pno in range(doc.page_count):
+            page = doc[pno]
+            words = page.get_text("words")
+            for d in page.get_drawings():
+                r = d["rect"]
+                fill = d.get("fill")
+                if not fill or len(fill) < 3:
+                    continue
+                if not (BADGE_MIN_SIDE <= r.width <= BADGE_MAX_SIDE
+                        and BADGE_MIN_SIDE <= r.height <= BADGE_MAX_SIDE):
+                    continue
+                inside = [w for w in words
+                          if r.x0 - 1 <= w[0] and w[2] <= r.x1 + 1
+                          and r.y0 - 1 <= w[1] and w[3] <= r.y1 + 1]
+                if len(inside) != 1 or not BADGE_NUM_RE.match(inside[0][4]):
+                    continue
+                key = tuple(round(c, 3) for c in fill[:3])
+                by_colour.setdefault(key, []).append(
+                    (pno + 1, inside[0][0], inside[0][1], int(inside[0][4])))
+
+    best: list = []
+    for items in by_colour.values():
+        if len(items) < BADGE_MIN_COUNT or len(items) <= len(best):
+            continue
+        if _badge_sequence_ok([i[3] for i in items]):
+            best = items
+    return {(p, round(x), round(y)) for p, x, y, _n in best}
+
+
+def match_question_number(w: Word, page_index: int, profile: Profile,
+                          badges: set | None):
+    """Kelime bir soru numarası mı? Profilin kalıbı ya da rozet konumu."""
+    m = profile.qnum_pattern.match(w.text)
+    if m is not None:
+        return m
+    if badges and (page_index, round(w.x0), round(w.y0)) in badges:
+        return BADGE_NUM_RE.match(w.text)
+    return None
+
+
+def header_cutoff(page: Page, profile: Profile, furniture: set,
+                  badges: set | None = None) -> float:
     """Başlık bandının bittiği y. Sabit bir değer kullanmak güvenilmez:
     bazı düzenlerde soru gövdesi 115pt'nin üstünde başlar ve gövdede geçen
     bir ders adı ("...125.988 TÜRKÇE sözcük derlendi...") sayfanın dersini
@@ -226,7 +331,7 @@ def header_cutoff(page: Page, profile: Profile, furniture: set) -> float:
     kalan kısımdır; soru bulunamazsa profildeki üst sınıra düşülür."""
     tops = [
         w.y0 for w in page.words
-        if profile.qnum_pattern.match(w.text)
+        if match_question_number(w, page.index, profile, badges)
         and not is_furniture(w, furniture)
         and starts_a_question(page, w)
     ]
@@ -238,33 +343,45 @@ def header_cutoff(page: Page, profile: Profile, furniture: set) -> float:
     return min(min(tops), profile.header_y_max) if tops else profile.header_y_max
 
 
-def header_text(page: Page, profile: Profile, furniture: set) -> str:
-    limit = header_cutoff(page, profile, furniture)
+def header_text(page: Page, profile: Profile, furniture: set,
+                badges: set | None = None) -> str:
+    limit = header_cutoff(page, profile, furniture, badges)
     return tr_upper(" ".join(w.text for w in page.words if w.y0 < limit))
 
 
-def explicit_subject_for_page(page: Page, profile: Profile, furniture: set) -> str | None:
+def explicit_subject_for_page(page: Page, profile: Profile, furniture: set,
+                              badges: set | None = None) -> str | None:
     """Sayfa başlığında geçen ders adını arar (harf büyüklüğünden bağımsız)
     — sadece BU sayfada açıkça yazılıysa döner."""
-    text = header_text(page, profile, furniture)
+    text = header_text(page, profile, furniture, badges)
     for keyword, subject_id in profile.subject_keywords.items():
         if tr_upper(keyword) in text:
+            return subject_id
+    if not profile.subject_in_footer:
+        return None
+    # Alt şerit — sözcük kümesiyle eşleştirilir (bkz. subject_in_footer).
+    tokens = {tr_upper(w.text).strip(".,;:|") for w in page.words
+              if in_footer_band(w, page.height, profile)}
+    for keyword, subject_id in profile.subject_keywords.items():
+        if set(tr_upper(keyword).split()) <= tokens:
             return subject_id
     return None
 
 
-def is_generic_content_page(page: Page, profile: Profile, furniture: set) -> bool:
+def is_generic_content_page(page: Page, profile: Profile, furniture: set,
+                            badges: set | None = None) -> bool:
     """content_markers boşsa hiçbir sayfa 'genel içerik' sayılmaz (ders adı
     her sayfada açıkça tekrar etmeli). Doluysa, o genel şeritlerden biri
     başlıkta geçen her sayfa içerik sayılır (ama hangi ders olduğu bir
     önceki açık eşleşmeden miras alınır)."""
     if not profile.content_markers:
         return False
-    text = header_text(page, profile, furniture)
+    text = header_text(page, profile, furniture, badges)
     return any(tr_upper(marker) in text for marker in profile.content_markers)
 
 
-def page_subjects(pages: list[Page], profile: Profile, furniture: set) -> dict:
+def page_subjects(pages: list[Page], profile: Profile, furniture: set,
+                  badges: set | None = None) -> dict:
     """Her sayfanın dersini belirler. Birçok yayınevi ders adını SADECE o
     dersin ilk sayfasında yazar, sonraki sayfalarda sadece genel bir bölüm
     şeridi ("SAYISAL BÖLÜM" gibi) tekrar eder — bu yüzden başlıkta açık ders
@@ -281,11 +398,12 @@ def page_subjects(pages: list[Page], profile: Profile, furniture: set) -> dict:
             result[page.index] = None
             last = None
             continue
-        explicit = explicit_subject_for_page(page, profile, furniture)
+        explicit = explicit_subject_for_page(page, profile, furniture, badges)
         if explicit is not None:
             result[page.index] = explicit
             last = explicit
-        elif page.index > 1 and last is not None and is_generic_content_page(page, profile, furniture):
+        elif page.index > 1 and last is not None and is_generic_content_page(
+                page, profile, furniture, badges):
             result[page.index] = last
         else:
             result[page.index] = None
@@ -373,7 +491,7 @@ def merge_margins(sorted_margins: list[float], slack: float) -> list[float]:
 
 
 def detect_columns(pages: list[Page], profile: Profile, subjects: dict,
-                   furniture: set) -> list[tuple]:
+                   furniture: set, badges: set | None = None) -> list[tuple]:
     """Soru numarası ADAYLARININ kabul edileceği x pencerelerini belirler.
 
     Burada bilerek CÖMERT davranılır: bir sütun kitapçık boyunca yalnızca
@@ -389,7 +507,7 @@ def detect_columns(pages: list[Page], profile: Profile, subjects: dict,
         for w in page.words:
             if in_footer_band(w, page.height, profile) or is_furniture(w, furniture):
                 continue
-            if profile.qnum_pattern.match(w.text):
+            if match_question_number(w, page.index, profile, badges):
                 xs.append(w.x0)
     if not xs:
         return [(0.0, 0.0)]
@@ -416,14 +534,14 @@ def column_index(x0: float, ranges: list[tuple], profile: Profile) -> int | None
 
 
 def find_question_candidates(page: Page, ranges: list[tuple], profile: Profile,
-                             furniture: set):
+                             furniture: set, badges: set | None = None):
     """Sayfadaki numara kalıbındaki kelimeleri okuma sırasına (sütun sırası,
     her sütun içinde üstten alta) göre döndürür."""
     cands = []
     for w in page.words:
         if in_footer_band(w, page.height, profile) or is_furniture(w, furniture):
             continue
-        m = profile.qnum_pattern.match(w.text)
+        m = match_question_number(w, page.index, profile, badges)
         if not m:
             continue
         col = column_index(w.x0, ranges, profile)
@@ -446,7 +564,8 @@ class Question:
 
 
 def extract_questions(pages: list[Page], profile: Profile,
-                      tight_bottom: bool = True) -> list[Question]:
+                      tight_bottom: bool = True,
+                      badges: set | None = None) -> list[Question]:
     """Sayfa sayfa ilerleyip 1'den başlayan artan diziyi kuran adayları
     gerçek soru kabul eder; ders değişiminde numaralandırma 1'e döner.
     Ders başlığı olmayan sayfalar (kapak, cevap anahtarı, kurallar) ve
@@ -459,8 +578,8 @@ def extract_questions(pages: list[Page], profile: Profile,
     aranır; sıralama yalnızca eşit adaylar arasında karar vermek için
     kullanılır."""
     furniture = find_repeating_furniture(pages)
-    subjects = page_subjects(pages, profile, furniture)
-    starts = detect_columns(pages, profile, subjects, furniture)
+    subjects = page_subjects(pages, profile, furniture, badges)
+    starts = detect_columns(pages, profile, subjects, furniture, badges)
 
     # Aynı numara sayfada birden çok yerde geçebilir (soru içi alt madde).
     # Gerçek soru numarası, kitapçık boyunca sık kullanılan bir sol marja
@@ -471,7 +590,8 @@ def extract_questions(pages: list[Page], profile: Profile,
         if subjects.get(page.index) is None:
             continue
         cands = []
-        for col, y0, number, w in find_question_candidates(page, starts, profile, furniture):
+        for col, y0, number, w in find_question_candidates(
+                page, starts, profile, furniture, badges):
             nxt = next_word_on_line(page, w)
             # Sondaki noktalama ayıklanır: talimat satırı "2. Cevaplarınızı,"
             # biçiminde de gelebiliyor.
@@ -694,6 +814,7 @@ def extract_questions(pages: list[Page], profile: Profile,
 
 
 UNRELIABLE_MISSING_RATIO = 0.5  # bu orandan fazlası eksikse çıktı güvenilmez sayılır
+CONFIDENT_MISSING_RATIO = 0.1   # bu orandan azı eksikse ikinci kaynağı denemeye gerek yok
 
 
 def extraction_report(questions: list[Question]) -> dict:
@@ -958,6 +1079,7 @@ def crop_questions(pdf_path: Path, out_dir: Path, profile: Profile = MEB_LGS_PRO
     out_dir.mkdir(parents=True, exist_ok=True)
     render_dir = out_dir / "_pages"
     page_images = render_pages(pdf_path, render_dir, dpi=dpi)
+    badges = find_number_badges(pdf_path)
 
     def attempt(kind):
         if kind == "pdf":
@@ -972,22 +1094,37 @@ def crop_questions(pdf_path: Path, out_dir: Path, profile: Profile = MEB_LGS_PRO
             pages = words_from_tesseract(page_images, dpi, ocr_lang)
         if not any(p.words for p in pages):
             return None, {}, kind
-        qs = extract_questions(pages, profile, tight_bottom=(kind == "pdf"))
+        tight = (kind == "pdf")
+        qs = extract_questions(pages, profile, tight_bottom=tight)
+        # Rozetli numaralar yalnızca gerçekten kazandırıyorsa kullanılır:
+        # rozet bulmak, kalıbın zaten çalıştığı kitapçıkta bir şeyi
+        # değiştirmemeli.
+        if badges:
+            alt = extract_questions(pages, profile, tight_bottom=tight,
+                                    badges=badges)
+            if len(alt) > len(qs):
+                qs = alt
         return qs, extraction_report(qs), kind
 
     fallback = "nim" if api_key else "ocr"
     attempts = {"pdf": ["pdf"], "ocr": ["ocr"], "nim": ["nim"],
                 "auto": ["pdf", fallback]}[source]
+    # İlk kaynak TEMİZ çıktıysa ikinciyi hiç denemeye gerek yok; "kabul
+    # edilebilir" çıktıda ise denemek gerekir. Eksik oranı yanıltıcıdır:
+    # beklenen soru sayısı BULUNANLARDAN türetiliyor, yani dizinin
+    # tamamını kaçıran bir kaynak (bir dersin 20 sorusundan yalnızca 9'unu
+    # görüp orada bitiren) kendini eksiksiz sanıyor. Bu yüzden yalnızca
+    # neredeyse kusursuz bir sonuç kestirir, gerisinde iki kaynak da
+    # denenip ÇOK SORU ÇIKARAN seçilir.
     questions, report, used = None, {}, None
     for kind in attempts:
         qs, rep, k = attempt(kind)
         miss, exp = missing_ratio(rep) if rep else (1, 1)
-        if qs and miss <= exp * UNRELIABLE_MISSING_RATIO:
+        better = questions is None or (qs and len(qs) > len(questions))
+        if better:
             questions, report, used = qs, rep, k
+        if qs and miss <= exp * CONFIDENT_MISSING_RATIO:
             break
-        # elde edilen en iyi sonucu sakla (hepsi başarısızsa raporlamak için)
-        if questions is None or (rep and miss < missing_ratio(report)[0]):
-            questions, report, used = qs, rep, k
 
     miss, exp = missing_ratio(report) if report else (1, 1)
     if not questions or miss > exp * UNRELIABLE_MISSING_RATIO:
@@ -1044,6 +1181,7 @@ PROFILES = {
     "meb": MEB_LGS_PROFILE,
     "sivas": SIVAS_KOPRU_PROFILE,
     "yaris": YARIS_PROFILE,
+    "fikri": FIKRI_BILIM_PROFILE,
 }
 
 if __name__ == "__main__":

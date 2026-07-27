@@ -85,7 +85,7 @@ apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-tur
 pip install Pillow pymupdf
 
 # 1) kitapçıktan soruları kırp
-python3 optik/crop_booklet.py kitapcik.pdf ./cikti
+python3 optik/crop_booklet.py kitapcik.pdf ./cikti --profil meb
 
 # 2) (isteğe bağlı) soruları metne + LaTeX'e çevir
 python3 optik/extract_text.py cikti/bbox.html kitapcik.pdf matematik > sorular.json
@@ -103,12 +103,31 @@ python3 optik/render_template.py deneme.pdf sorular.json --pages cikti/_pages
 
 | Parça | Durum |
 |---|---|
-| Kitapçıktan soru kırpma (5 yayınevi test edildi) | ✅ |
+| Kitapçıktan soru kırpma (6 yayınevi · 9 kitapçık) | ✅ |
 | Metin katmanı bozuksa OCR'a düşme | ✅ |
 | Metin + LaTeX çıkarma (üst simge, kök, şık) | ✅ Matematik 18/20 · Türkçe 20/20 |
 | Görsel ağırlıklı soruyu tek parça taşıma | ✅ |
 | Cevap anahtarı eşleştirme, yanlış listesi | ✅ |
 | Özel deneme üretimi + markalı şablon | ✅ |
 | **Optik form okuma** | ⛔ **Ateş** |
+
+### Kitapçık kapsamı
+
+`--profil` ile yayınevi seçilir: `meb` · `sivas` · `yaris` · `fikri`.
+
+| Kitapçık | Profil | Çıkan / toplam |
+|---|---|---|
+| MEB 2024 sayısal | meb | 40 / 40 |
+| MEB 2024 sözel | meb | 50 / 50 |
+| Sivas Köprü 5 · 6 · 8 | sivas | 20 / 20 (her biri) |
+| Sivas Köprü 7 (tam LGS) | sivas | 88 / 90 |
+| Kerimhoca Matematik 2 | meb | 20 / 20 |
+| Yarış 4 | yaris | 88 / 90 |
+| Fikri Bilim 4 | fikri | 65 / 90 |
+
+Metin katmanı sağlam olan kitapçıklar eksiksiz çıkıyor. Yarış ve Fikri
+Bilim'de gövde fontu Unicode'a eşlenmediği için (`pdffonts`: `uni no`)
+OCR'a düşülüyor; kalan eksikler OCR'ın soru numarasını okuyamadığı
+sorular.
 
 Ayrıntılı teknik notlar ve bilinen sınırlar: [`optik/README.md`](optik/README.md)
