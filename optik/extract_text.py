@@ -253,9 +253,6 @@ def figure_boxes(pdf_page, q, decorations: set) -> list:
 
 LABEL_GAP = 11.0          # pt: şekle bu kadar yakın yazı, şeklin etiketi sayılır
 MAX_LABEL_ROW_WORDS = 5   # bu kadar az kelimeli satır = etiket, değilse paragraf
-# Şekil alanı sorunun bu oranını aşıyorsa soru görsel ağırlıklıdır ve
-# metne ayrıştırılmak yerine tek parça görüntü olarak taşınır.
-FIGURE_HEAVY_RATIO = 0.12
 
 
 def grow_to_labels(boxes: list, words, passes: int = 2) -> list:
@@ -417,9 +414,13 @@ def question_text(page, q, prof, is_boilerplate, radicals: list[tuple] = (),
     # getirmiyor: etiketler şeklin parçası, cümleden ayrılınca ikisi de
     # bozuluyor. Böyle sorular TEK PARÇA olarak, temizlenmiş görüntüyle
     # taşınır — sayfa düzeni yine bizim şablonumuzda kalır.
-    fig_area = sum((b.x1 - b.x0) * (b.y1 - b.y0) for b in figures)
-    q_area = max((q.x1 - q.x0) * (q.y1 - q.y0), 1.0)
-    if fig_area / q_area >= FIGURE_HEAVY_RATIO:
+    # ŞEKLİ OLAN HER SORU tek parça taşınır. Önce "şekil alanı yeterince
+    # büyükse" diye oranlanıyordu; eşiğin altında kalan sorular metin
+    # yoluna düşüyor, orada şeklin etiketleri hem cümleye karışıyor hem
+    # görselden kırpılıyordu (eksen adı "Zaman" -> "Za"). Metne
+    # ayrıştırmanın kazandırdığı esneklik zaten yalnızca şekilsiz
+    # sorularda gerçek.
+    if figures:
         qt.mode = "gorsel"
         qt.full_crop = content_bounds(page, q, prof, figures)
     if len(options) != 4:
@@ -445,12 +446,32 @@ def find_missing_radicals(page, q) -> bool:
 if __name__ == "__main__":
     import json
 
-    from crop_booklet import (MEB_LGS_PROFILE, extract_questions,
-                              is_boilerplate_word, parse_bbox)
+    import crop_booklet
+    from crop_booklet import extract_questions, is_boilerplate_word, parse_bbox
 
-    bbox = Path(sys.argv[1])
-    pdf = Path(sys.argv[2])
-    subject = sys.argv[3] if len(sys.argv) > 3 else None
+    # Yayınevi profili dışarıdan seçilir; kırpma tarafı zaten profil
+    # bazlıydı, metin çıkarma MEB'e sabitlenmiş kalmıştı ve bu yüzden
+    # Sivas/Yarış kitapçıklarında çalıştırılamıyordu.
+    PROFILES = {
+        "meb": crop_booklet.MEB_LGS_PROFILE,
+        "sivas": crop_booklet.SIVAS_KOPRU_PROFILE,
+        "yaris": crop_booklet.YARIS_PROFILE,
+    }
+
+    args = sys.argv[1:]
+    profile_name = "meb"
+    if "--profil" in args:
+        i = args.index("--profil")
+        profile_name = args[i + 1]
+        del args[i:i + 2]
+    if profile_name not in PROFILES:
+        raise SystemExit(f"Bilinmeyen profil: {profile_name} "
+                         f"(seçenekler: {', '.join(PROFILES)})")
+    profile = PROFILES[profile_name]
+
+    bbox = Path(args[0])
+    pdf = Path(args[1])
+    subject = args[2] if len(args) > 2 else None
 
     import fitz  # PyMuPDF: kök çizgileri yalnızca vektör katmanında var
 
@@ -464,7 +485,7 @@ if __name__ == "__main__":
     decorations = decoration_rects(doc)
 
     out = []
-    for q in extract_questions(pages, MEB_LGS_PROFILE):
+    for q in extract_questions(pages, profile):
         if subject and q.subject != subject:
             continue
         page = by_index[q.page]
@@ -485,7 +506,7 @@ if __name__ == "__main__":
         else:
             figures = grow_to_labels(
                 figure_boxes(doc[q.page - 1], q, decorations), in_q)
-        qt = question_text(page, q, MEB_LGS_PROFILE, is_boilerplate_word,
+        qt = question_text(page, q, profile, is_boilerplate_word,
                            radicals_by_page.get(q.page, []), figures)
         out.append(qt.as_dict())
     print(json.dumps(out, ensure_ascii=False, indent=2))
